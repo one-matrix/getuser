@@ -12,7 +12,7 @@
 """
 import asyncio
 import pytest
-from jose import jwt
+import jwt
 
 from api.services.auth import JWT_SECRET_KEY, JWT_ALGORITHM
 
