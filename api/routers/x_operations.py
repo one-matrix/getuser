@@ -11,7 +11,7 @@ import json
 import re
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
@@ -33,6 +33,7 @@ from api.schemas.x_operations import (
     XRegionUpdateRequest,
     XReplyCandidatesRequest,
     XReviewApprovalRequest,
+    XReviewFlagRequest,
     XReviewRejectRequest,
     XThreadCollectionRequest,
     XTopicPostCollectionRequest,
@@ -84,7 +85,11 @@ from database.models import (
     XUserOptOut,
 )
 from media_platform.x.browser_client import XBrowserClient
-from media_platform.x.browser_session import open_x_browser
+from media_platform.x.browser_session import (
+    open_x_browser,
+    open_x_login_window as launch_x_login_window,
+    x_browser_profile_status,
+)
 from media_platform.x.client import XWriteApiClient
 from media_platform.x.exception import (
     XApiError,
@@ -229,7 +234,13 @@ def _post_url(post_id: str) -> str:
 
 @asynccontextmanager
 async def _browser_reader():
-    async with open_x_browser() as runtime:
+    stack = AsyncExitStack()
+    try:
+        runtime = await stack.enter_async_context(open_x_browser())
+    except XBrowserError as exc:
+        await stack.aclose()
+        _raise_x_browser_error(exc)
+    async with stack:
         yield XBrowserClient(runtime.page, cdp_url=runtime.cdp_url)
 
 
@@ -531,6 +542,19 @@ def _raise_x_error(exc: XApiError) -> None:
 
 
 def _raise_x_browser_error(exc: XBrowserError) -> None:
+    if exc.error_code in {
+        "browser_profile_in_use",
+        "browser_profile_in_use_without_cdp",
+        "browser_cdp_connect_failed",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(exc),
+                "action": "关闭旧的专用 X 窗口，再从系统打开；或用同一 Profile 启动本地 CDP",
+                "error_code": exc.error_code,
+            },
+        )
     if isinstance(exc, XBrowserLoginRequired):
         raise HTTPException(status_code=503, detail=str(exc))
     if isinstance(exc, XBrowserChallengeRequired):
@@ -593,6 +617,147 @@ async def _account_access_token(
             account.updated_at = _now_ms()
             return ""
     return token
+
+
+@router.get("/browser/status")
+async def browser_status(current_user: dict = Depends(get_current_user)):
+    """Expose non-secret browser diagnostics without opening X."""
+
+    owner_user_id = _owner(current_user)
+    async with get_session() as session:
+        synced_result = await session.execute(
+            select(func.count(XAccount.id)).where(
+                XAccount.owner_user_id == owner_user_id,
+                XAccount.status == "active",
+                XAccount.last_sync_at > 0,
+            )
+        )
+        return {
+            **x_browser_profile_status(),
+            "read_enabled": bool((await _controls(session, owner_user_id))["read_enabled"]),
+            "synced_account_count": int(synced_result.scalar() or 0),
+            "llm_configured": bool(
+                x_config.LLM_BASE_URL
+                and x_config.LLM_API_KEY
+                and x_config.LLM_MODEL
+            ),
+        }
+
+
+@router.post("/browser/sync-account")
+async def sync_browser_account(
+    current_user: dict = Depends(require_x_operator),
+):
+    """Verify the logged-in browser profile and create a draft-only account.
+
+    This path does not call an X read API and does not create write credentials.
+    An OAuth binding with the same username is enriched instead of duplicated.
+    """
+
+    owner_user_id = _owner(current_user)
+    try:
+        async with _browser_reader() as client:
+            identity = await client.get_current_identity()
+    except XBrowserError as exc:
+        _raise_x_browser_error(exc)
+
+    username = str(identity.get("username") or "").strip().lstrip("@")
+    if not username:
+        raise HTTPException(status_code=502, detail="浏览器已打开 X，但无法识别当前登录账号")
+
+    browser_user_id = str(identity.get("id") or f"web:{username.casefold()}")
+    now = _now_ms()
+    async with get_session() as session:
+        result = await session.execute(
+            select(XAccount)
+            .where(
+                XAccount.owner_user_id == owner_user_id,
+                or_(
+                    XAccount.x_user_id == browser_user_id,
+                    func.lower(XAccount.username) == username.casefold(),
+                ),
+            )
+            .order_by(XAccount.id)
+            .limit(1)
+        )
+        account = result.scalars().first()
+        created = account is None
+        if account is None:
+            account = XAccount(
+                owner_user_id=owner_user_id,
+                x_user_id=browser_user_id,
+                username=username,
+                display_name=str(identity.get("name") or ""),
+                account_type="brand",
+                granted_scopes="[]",
+                write_enabled=False,
+                auto_reply_enabled=False,
+                status="active",
+                created_at=now,
+            )
+            session.add(account)
+        else:
+            account.username = username
+            account.display_name = str(identity.get("name") or account.display_name or "")
+            account.status = "active"
+        account.last_sync_at = now
+        account.last_error = ""
+        account.updated_at = now
+        await session.flush()
+        await _record_usage(
+            session,
+            owner_user_id=owner_user_id,
+            account_id=account.id,
+            endpoint="BROWSER /home identity",
+            read_count=1,
+        )
+        await _audit(
+            session,
+            owner_user_id=owner_user_id,
+            actor_user_id=owner_user_id,
+            action="browser.account.synced",
+            entity_type="x_account",
+            entity_id=str(account.id),
+            account_id=account.id,
+            after={
+                "username": account.username,
+                "identity_source": identity.get("source") or "browser_profile",
+                "created": created,
+                "write_credentials_created": False,
+            },
+        )
+        payload = _serialize(account)
+        payload["token_configured"] = bool(
+            account.access_token_encrypted or x_config.X_ACCESS_TOKEN
+        )
+        payload["token_expired"] = bool(
+            account.token_expires_at and account.token_expires_at <= now
+        )
+        payload["browser_synced"] = True
+        return {
+            "success": True,
+            "message": f"已识别浏览器登录账号 @{username}，可用于采集和 AI 草稿",
+            "identity": identity,
+            "account": payload,
+            "browser": x_browser_profile_status(),
+        }
+
+
+@router.post("/browser/open-login")
+async def open_browser_login(
+    current_user: dict = Depends(require_x_operator),
+):
+    """Open the dedicated local profile for manual X login."""
+
+    try:
+        launched = launch_x_login_window()
+    except XBrowserError as exc:
+        _raise_x_browser_error(exc)
+    return {
+        "success": True,
+        "message": "已打开专用 X 浏览器。完成登录后可保持窗口打开，直接执行“检测登录并同步账号”。",
+        "browser": launched,
+    }
 
 
 @router.get("/automation/status")
@@ -1984,6 +2149,10 @@ async def _generate_candidates_for_post(
                 "review": _serialize(review),
             }
         )
+    if interaction is not None and persisted:
+        interaction.status = "drafted"
+        interaction.processed_at = now
+        interaction.updated_at = now
     await _audit(
         session,
         owner_user_id=owner_user_id,
@@ -2198,7 +2367,7 @@ async def approve_review(
             raise HTTPException(status_code=404, detail="审核任务不存在")
         if review.reply_candidate_id != body.candidate_id:
             raise HTTPException(status_code=400, detail="candidate_id 与审核任务不匹配")
-        if review.review_status not in {"pending", "in_review", "approved"}:
+        if review.review_status not in {"pending", "in_review", "needs_fact_check", "approved"}:
             raise HTTPException(status_code=409, detail=f"当前审核状态不可批准: {review.review_status}")
         candidate = await _owned_by_id(
             session,
@@ -2242,6 +2411,61 @@ async def approve_review(
         return {
             "success": True,
             "message": "已批准；发布时仍会重新检查 Kill Switch、资格、预算和文本哈希",
+            "review": await _review_payload(session, review=review, owner_user_id=owner_user_id),
+        }
+
+
+@router.post("/reviews/{review_id}/flag")
+async def flag_review(
+    review_id: int,
+    body: XReviewFlagRequest,
+    current_user: dict = Depends(require_x_operator),
+):
+    owner_user_id = _owner(current_user)
+    async with get_session() as session:
+        review = await _owned_by_id(session, XReviewTask, review_id, owner_user_id)
+        if review is None:
+            raise HTTPException(status_code=404, detail="审核任务不存在")
+        if review.review_status in {"published", "publishing"}:
+            raise HTTPException(status_code=409, detail="已发布或发布中的任务不能重新标记")
+        candidate = await _owned_by_id(
+            session,
+            XReplyCandidate,
+            review.reply_candidate_id,
+            owner_user_id,
+        )
+        before = _serialize(review)
+        if body.action == "fact_check":
+            review.review_status = "needs_fact_check"
+            if candidate:
+                candidate.requires_fact_check = True
+                candidate.review_status = "pending"
+                candidate.updated_at = _now_ms()
+        else:
+            review.review_status = "blocked"
+            if candidate:
+                candidate.risk_level = "blocked"
+                candidate.review_status = "invalidated"
+                candidate.updated_at = _now_ms()
+        review.review_reason = body.reason
+        review.reviewed_by_user_id = owner_user_id
+        review.reviewed_at = _now_ms()
+        review.updated_at = _now_ms()
+        await _audit(
+            session,
+            owner_user_id=owner_user_id,
+            actor_user_id=owner_user_id,
+            action=f"review.{body.action}",
+            entity_type="x_review_task",
+            entity_id=str(review.id),
+            account_id=review.account_id,
+            before=before,
+            after=_serialize(review),
+            metadata={"reason": body.reason},
+        )
+        return {
+            "success": True,
+            "message": "已标记需要事实核验" if body.action == "fact_check" else "已标记禁止参与",
             "review": await _review_payload(session, review=review, owner_user_id=owner_user_id),
         }
 

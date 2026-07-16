@@ -1,5 +1,9 @@
 import request from './request';
 
+const X_BROWSER_REQUEST = { timeout: 210_000, skipRetry: true };
+const X_MODEL_REQUEST = { timeout: 120_000, skipRetry: true };
+const X_WRITE_REQUEST = { timeout: 120_000, skipRetry: true };
+
 export interface XListResponse<T> {
   items: T[];
   total: number;
@@ -143,10 +147,15 @@ export interface XThreadAnalysis {
   analysed_at?: string | number;
 }
 
+export interface XThreadNode extends XPost {
+  children?: XThreadNode[];
+}
+
 export interface XConversation {
   root_post?: XPost;
   posts?: XPost[];
   replies?: XPost[];
+  tree?: XThreadNode[];
   analysis?: XThreadAnalysis | null;
   candidates?: XReplyCandidate[];
   total?: number;
@@ -201,6 +210,8 @@ export interface XCredentialStatus {
   llm?: boolean;
   write_token?: boolean;
   fallback_drafts_available?: boolean;
+  x_client_id?: boolean;
+  token_encryption_key?: boolean;
 }
 
 export interface XAutomationStatus {
@@ -243,6 +254,43 @@ export interface XAccount {
   write_enabled?: boolean;
   last_test_at?: string | number;
   last_error?: string;
+  browser_synced?: boolean;
+}
+
+export interface XBrowserStatus {
+  profile_source?: 'configured' | 'project_default' | string;
+  profile_dir?: string;
+  profile_exists?: boolean;
+  cookie_store_detected?: boolean;
+  profile_lock_detected?: boolean;
+  profile_in_use?: boolean;
+  cdp_mode?: boolean;
+  cdp_ready?: boolean;
+  connect_existing?: boolean;
+  debug_port?: number;
+  headless?: boolean;
+  browser_use_fallback_enabled?: boolean;
+  read_enabled?: boolean;
+  synced_account_count?: number;
+  llm_configured?: boolean;
+}
+
+export interface XInteraction {
+  id: string | number;
+  account_id: string | number;
+  interaction_post_id?: string;
+  actor_x_user_id?: string;
+  interaction_type?: string;
+  status?: string;
+  opt_in_evidence_json?: Record<string, unknown> | string;
+  eligibility_json?: Record<string, unknown> | string;
+  is_opted_out?: boolean;
+  replied_publish_job_id?: string | number;
+  received_at?: string | number;
+  processed_at?: string | number;
+  created_at?: string | number;
+  updated_at?: string | number;
+  post?: XPost;
 }
 
 export interface XEndpointUsage {
@@ -278,6 +326,7 @@ export interface XUsageSummary {
   estimated_cost?: number;
   budget_ratio?: number;
   forced_read_only?: boolean;
+  write_budget_exhausted?: boolean;
   request_count?: number;
   success_count?: number;
   error_count?: number;
@@ -297,6 +346,9 @@ export interface XAuditLog {
   account_id?: string | number;
   target_post_id?: string;
   request_id?: string;
+  before_state_json?: Record<string, unknown> | string;
+  after_state_json?: Record<string, unknown> | string;
+  metadata_json?: Record<string, unknown> | string;
   created_at?: string | number;
 }
 
@@ -328,34 +380,44 @@ export const getXTopics = (params?: XTopicQuery): Promise<XListResponse<XTopic>>
   request.get('/x/topics', { params });
 
 export const refreshXTopics = (data?: { region_ids?: Array<string | number> }): Promise<{ success: boolean; message?: string; job_id?: string }> =>
-  request.post('/x/topics/refresh', data || {});
+  request.post('/x/topics/refresh', data || {}, X_BROWSER_REQUEST);
 
 export const collectXTopicPosts = (
   topicId: string | number,
   data?: { max_posts?: number; language?: string },
 ): Promise<{ success: boolean; message?: string; items?: XPost[]; total?: number }> =>
-  request.post(`/x/topics/${topicId}/collect-posts`, data || { max_posts: 50 });
+  request.post(`/x/topics/${topicId}/collect-posts`, data || { max_posts: 50 }, X_BROWSER_REQUEST);
 
 export const getXPosts = (params?: XPostQuery): Promise<XListResponse<XPost>> =>
   request.get('/x/posts', { params });
 
-export const getXPost = (postId: string | number): Promise<XPost> =>
+export const getXPost = (postId: string | number): Promise<{ post: XPost; conversation?: Record<string, unknown> }> =>
   request.get(`/x/posts/${postId}`);
 
-export const collectXThread = (postId: string | number): Promise<{ success: boolean; message?: string; job_id?: string }> =>
-  request.post(`/x/posts/${postId}/collect-thread`, { max_posts: 50 });
+export const collectXThread = (postId: string | number): Promise<XConversation & { success: boolean; message?: string }> =>
+  request.post(`/x/posts/${postId}/collect-thread`, { max_posts: 50 }, X_BROWSER_REQUEST);
 
 export const getXConversation = (rootPostId: string): Promise<XConversation> =>
   request.get(`/x/conversations/${rootPostId}`);
 
 export const analyzeXConversation = (rootPostId: string): Promise<{ success?: boolean; message?: string; job_id?: string; analysis?: XThreadAnalysis } | XThreadAnalysis> =>
-  request.post(`/x/conversations/${rootPostId}/analyze`, { max_samples: 25 });
+  request.post(`/x/conversations/${rootPostId}/analyze`, { max_samples: 25 }, X_MODEL_REQUEST);
 
 export const generateXReplyCandidates = (
   postId: string | number,
   data: { account_id: string | number; tone?: string; candidate_count?: number },
-): Promise<{ success?: boolean; message?: string; review_id?: string | number; candidates?: XReplyCandidate[] }> =>
-  request.post(`/x/posts/${postId}/reply-candidates`, data);
+): Promise<{
+  success?: boolean;
+  message?: string;
+  account?: XAccount;
+  post?: XPost;
+  items?: Array<{ candidate?: XReplyCandidate; review?: XReviewTask }>;
+  total?: number;
+  recommended_index?: number;
+  reason?: string;
+  fallback_used?: boolean;
+}> =>
+  request.post(`/x/posts/${postId}/reply-candidates`, data, X_MODEL_REQUEST);
 
 export const getXReviews = (params?: XReviewQuery): Promise<XListResponse<XReviewTask>> =>
   request.get('/x/reviews', { params });
@@ -367,7 +429,7 @@ export const regenerateXReview = (
   reviewId: string | number,
   data?: { tone?: string },
 ): Promise<{ success: boolean; message?: string; candidates?: XReplyCandidate[] }> =>
-  request.post(`/x/reviews/${reviewId}/regenerate`, data || {});
+  request.post(`/x/reviews/${reviewId}/regenerate`, data || {}, X_MODEL_REQUEST);
 
 export const approveXReview = (
   reviewId: string | number,
@@ -386,6 +448,12 @@ export const rejectXReview = (
 ): Promise<{ success: boolean; message?: string; status?: string }> =>
   request.post(`/x/reviews/${reviewId}/reject`, data);
 
+export const flagXReview = (
+  reviewId: string | number,
+  data: { action: 'fact_check' | 'block'; reason: string },
+): Promise<{ success: boolean; message?: string; review?: XReviewTask }> =>
+  request.post(`/x/reviews/${reviewId}/flag`, data);
+
 export const publishXReview = (
   reviewId: string | number,
   data: {
@@ -395,14 +463,33 @@ export const publishXReview = (
     publish_mode: 'manual_review';
   },
 ): Promise<{ success: boolean; message?: string; status?: string; x_post_id?: string }> =>
-  request.post(`/x/reviews/${reviewId}/publish`, data);
+  request.post(`/x/reviews/${reviewId}/publish`, data, X_WRITE_REQUEST);
 
 export const getXAutomationStatus = (): Promise<XAutomationStatus> =>
   request.get('/x/automation/status');
 
+export const getXBrowserStatus = (): Promise<XBrowserStatus> =>
+  request.get('/x/browser/status');
+
+export const syncXBrowserAccount = (): Promise<{
+  success: boolean;
+  message?: string;
+  identity?: { id?: string; username?: string; name?: string; source?: string };
+  account?: XAccount;
+  browser?: XBrowserStatus;
+}> =>
+  request.post('/x/browser/sync-account', {}, X_BROWSER_REQUEST);
+
+export const openXBrowserLogin = (): Promise<{
+  success: boolean;
+  message?: string;
+  browser?: { pid?: number; profile_dir?: string; browser_name?: string; url?: string };
+}> =>
+  request.post('/x/browser/open-login', {}, { skipRetry: true });
+
 export const updateXAutomationControls = (
   data: Partial<XAutomationStatus>,
-): Promise<{ success: boolean; message?: string; status?: XAutomationStatus } | XAutomationStatus> =>
+): Promise<{ success: boolean; message?: string; controls?: XAutomationStatus } | XAutomationStatus> =>
   request.patch('/x/automation/controls', data);
 
 export const getXAccounts = (): Promise<XListResponse<XAccount>> =>
@@ -412,7 +499,7 @@ export const startXOAuth = (): Promise<{ authorization_url?: string; url?: strin
   request.post('/x/accounts/oauth/start', {});
 
 export const testXAccount = (accountId: string | number): Promise<{ success: boolean; message?: string }> =>
-  request.post(`/x/accounts/${accountId}/test`);
+  request.post(`/x/accounts/${accountId}/test`, {}, X_BROWSER_REQUEST);
 
 export const updateXAccount = (
   accountId: string | number,
@@ -431,3 +518,53 @@ export const getXUsage = (): Promise<XUsageSummary> =>
 
 export const getXAuditLogs = (params?: { limit?: number; offset?: number }): Promise<XListResponse<XAuditLog>> =>
   request.get('/x/audit-logs', { params });
+
+export const refreshXInteractions = (data: {
+  account_id?: string | number;
+  since_id?: string;
+  max_posts?: number;
+}): Promise<{
+  success: boolean;
+  message?: string;
+  items?: Array<{
+    interaction?: XInteraction;
+    post?: XPost;
+    eligibility?: Record<string, unknown>;
+  }>;
+  total?: number;
+  next_since_id?: string;
+  auto_publish_created?: false;
+}> =>
+  request.post('/x/interactions/refresh', data, X_BROWSER_REQUEST);
+
+export const getXInteractions = (params?: {
+  status?: string;
+  account_id?: string | number;
+  limit?: number;
+  offset?: number;
+}): Promise<XListResponse<XInteraction>> =>
+  request.get('/x/interactions', { params });
+
+export const evaluateXInteraction = (
+  interactionId: string | number,
+): Promise<{
+  success: boolean;
+  interaction?: XInteraction;
+  eligibility?: Record<string, unknown>;
+  opt_out?: Record<string, unknown>;
+  intent?: Record<string, unknown>;
+}> =>
+  request.post(`/x/interactions/${interactionId}/evaluate`, { account_post_ids: [] });
+
+export const optOutXUser = (
+  xUserId: string,
+  data: {
+    account_id: string | number;
+    username_snapshot?: string;
+    source_interaction_id?: string | number;
+    source_post_id?: string;
+    detected_phrase: string;
+    evidence?: Record<string, unknown>;
+  },
+): Promise<{ success: boolean; message?: string }> =>
+  request.post(`/x/users/${encodeURIComponent(xUserId)}/opt-out`, data);

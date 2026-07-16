@@ -81,13 +81,19 @@ _EXTRACT_TRENDS_SCRIPT = r"""
     const container = node.closest('[data-testid="trend"], [data-testid="trendItem"]') || node;
     const link = container.matches('a') ? container : container.querySelector('a[href*="/search?q="]');
     const href = link ? link.getAttribute('href') || '' : '';
-    const textParts = Array.from(container.querySelectorAll('span'))
-      .map((span) => (span.textContent || '').trim())
+    const textParts = (container.innerText || '')
+      .split('\n')
+      .map((part) => part.trim())
       .filter(Boolean);
-    const name = textParts.find((part) =>
-      !/(Trending in|What.s happening|趋势|流行|Posts?|帖子)/i.test(part)
-      && !/^[\d.,]+\s*[KMB万亿]?\s*(posts?|帖子)?$/i.test(part)
-    ) || '';
+    if (textParts.some((part) => /Promoted by|推广$/i.test(part))) continue;
+    const contentParts = textParts.filter((part) =>
+      part !== '·'
+      && !/^\d+$/.test(part)
+      && !/(Only on X|Trending in|Entertainment · Trending|Food · Trending|Sports · Trending|What.s happening|趋势|流行)$/i.test(part)
+      && !/^Trending with\b/i.test(part)
+      && !/^[\d.,]+\s*[KMB万亿]?\s*(posts?|帖子)$/i.test(part)
+    );
+    const name = contentParts[contentParts.length - 1] || '';
     if (!name || seen.has(name)) continue;
     seen.add(name);
     const volume = textParts.find((part) => /[\d.,]+\s*[KMB万亿]?\s*(posts?|帖子)/i.test(part)) || '';
@@ -134,12 +140,19 @@ class XBrowserClient:
     ) -> Dict[str, Any]:
         url = f"{x_config.X_BROWSER_BASE_URL}/explore/tabs/trending"
         await self._goto(url, require_login=True)
+        await self._ensure_trends_rendered()
         items = await self._evaluate(_EXTRACT_TRENDS_SCRIPT)
         normalized = [
             {
                 "trend_name": str(item.get("name") or "").strip(),
                 "tweet_count": _parse_count(item.get("volume")),
-                "source_url": _absolute_url(str(item.get("href") or "")),
+                "source_url": (
+                    _absolute_url(str(item.get("href") or ""))
+                    or (
+                        f"{x_config.X_BROWSER_BASE_URL}/search"
+                        f"?q={quote(str(item.get('name') or ''), safe='')}&src=trend_click"
+                    )
+                ),
                 "browser_region": region_name,
                 "legacy_woeid": str(woeid),
             }
@@ -166,6 +179,25 @@ class XBrowserClient:
         if not normalized:
             raise XBrowserStructureChanged("X trends page returned no extractable topics")
         return {"data": normalized, "meta": {"source": "browser", "result_count": len(normalized)}}
+
+    async def _ensure_trends_rendered(self) -> None:
+        """Wait for X's lazy Explore timeline and reselect Trending if needed."""
+
+        if not hasattr(self.page, "locator"):
+            return
+        trends = self.page.locator('[data-testid="trend"], [data-testid="trendItem"]')
+        try:
+            await trends.first.wait_for(state="visible", timeout=6_000)
+            return
+        except Exception:
+            pass
+        try:
+            tab = self.page.locator('a[role="tab"][href="/explore/tabs/trending"]')
+            if await tab.count():
+                await tab.first.click()
+            await trends.first.wait_for(state="visible", timeout=10_000)
+        except Exception:
+            return
 
     async def search_topic(
         self,

@@ -1,5 +1,15 @@
 import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios';
 
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    skipRetry?: boolean;
+  }
+
+  export interface InternalAxiosRequestConfig {
+    skipRetry?: boolean;
+  }
+}
+
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
 const request = axios.create({
@@ -50,7 +60,7 @@ request.interceptors.response.use(
 
     config.retryCount = config.retryCount || 0;
 
-    if (config.retryCount < MAX_RETRIES && shouldRetry(error)) {
+    if (!config.skipRetry && config.retryCount < MAX_RETRIES && shouldRetry(error)) {
       config.retryCount++;
       console.warn(`请求失败，第 ${config.retryCount} 次重试...`, config.url);
       await sleep(RETRY_DELAY * config.retryCount);

@@ -1665,7 +1665,26 @@ const TaskManager: React.FC = () => {
                 <Descriptions.Item label="已获客">{detailTask.total_leads} 条</Descriptions.Item>
               </Descriptions>
 
-              {/* 推广配置区域 */}
+              {detailTask.platform === 'x' ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="X 任务只负责浏览器采集"
+                  description={(
+                    <div>
+                      热点、帖子、线程和 mentions 的查看、AI 草稿与单条审核统一在“X 运营中心”完成。
+                      本任务不会调用通用获客、批量私信或自动评论流程。
+                      <div style={{ marginTop: 12 }}>
+                        <Button type="primary" onClick={() => window.location.assign('/x')}>
+                          打开 X 运营中心
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                  style={{ marginTop: 16 }}
+                />
+              ) : (
+              /* 推广配置区域 */
               <div style={{ marginTop: 16, padding: 16, background: '#fff7e6', borderRadius: 8 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                   <h4 style={{ margin: 0 }}>🎯 推广配置</h4>
@@ -1683,8 +1702,9 @@ const TaskManager: React.FC = () => {
                   <div style={{ color: '#999', fontSize: 13 }}>尚未配置推广信息，点击"编辑"按钮设置</div>
                 )}
               </div>
+              )}
             </TabPane>
-            {detailTask.platform !== 'xhs' && (
+            {!['xhs', 'x'].includes(detailTask.platform) && (
             <TabPane tab={<span>📊 采集数据 {detailDataCount > 0 && <Badge count={detailDataCount} style={{ marginLeft: 4 }} size="small" />}</span>} key="data">
               <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'flex-end' }}>
                 <Button
@@ -1755,7 +1775,7 @@ const TaskManager: React.FC = () => {
               )}
             </TabPane>
             )}
-            {detailTask.platform !== 'xhs' && (
+            {!['xhs', 'x'].includes(detailTask.platform) && (
             <TabPane tab={<span>💬 评论获客 {detailCommentCount > 0 && <Badge count={detailCommentCount} style={{ marginLeft: 4 }} size="small" />}</span>} key="comments">
               <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
                 <Button

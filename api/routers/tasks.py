@@ -19,7 +19,7 @@ from sqlalchemy.orm import sessionmaker
 import config
 from tools import utils
 from database.db_session import get_async_engine
-from database.models import CrawlerTaskModel, TaskLogModel, CustomerLead, DouyinAweme, DouyinAwemeComment, XhsNote, XhsNoteComment, OutreachRecord, OutreachTaskModel, KuaishouVideoComment, WeiboNoteComment, BilibiliVideoComment, TiebaComment, ZhihuComment, AutoOutreachJobModel
+from database.models import CrawlerTaskModel, TaskLogModel, CustomerLead, DouyinAweme, DouyinAwemeComment, XhsNote, XhsNoteComment, OutreachRecord, OutreachTaskModel, KuaishouVideoComment, WeiboNoteComment, BilibiliVideoComment, TiebaComment, ZhihuComment, AutoOutreachJobModel, XJob
 from ..services.auth import get_current_user, user_scope_filter, is_admin
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -649,6 +649,37 @@ def _owner_id(user: dict) -> str:
     return str(user["id"])
 
 
+async def _latest_x_task_run(session: AsyncSession, task_id: str) -> dict:
+    """Return the latest X inline job result associated with a crawler task."""
+
+    result = await session.execute(
+        select(XJob)
+        .where(XJob.payload_json.like(f'%"task_id":"{task_id}"%'))
+        .order_by(XJob.created_at.desc(), XJob.id.desc())
+        .limit(1)
+    )
+    job = result.scalars().first()
+    if job is None:
+        return {"status": "", "count": 0, "error": ""}
+    try:
+        payload = json.loads(job.result_json or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    persistence = payload.get("persistence") if isinstance(payload.get("persistence"), dict) else {}
+    count = int(
+        payload.get("post_count")
+        or payload.get("topic_count")
+        or persistence.get("post_count")
+        or persistence.get("topic_count")
+        or 0
+    )
+    return {
+        "status": str(job.status or ""),
+        "count": count,
+        "error": str(job.last_error or ""),
+    }
+
+
 async def _task_to_dict(task: CrawlerTaskModel, session: AsyncSession = None) -> dict:
     """将ORM对象转换为字典，包含实时统计数据"""
     need_close = False
@@ -762,6 +793,11 @@ async def _task_to_dict(task: CrawlerTaskModel, session: AsyncSession = None) ->
                 select(func.count()).select_from(ZhihuComment).where(ZhihuComment.task_id == task.id)
             )
             comment_count = result.scalar() or 0
+
+        elif task.platform == "x":
+            x_run = await _latest_x_task_run(session, task.id)
+            content_count = x_run["count"]
+            comment_count = 0
 
         else:
             content_count = 0
@@ -1014,6 +1050,8 @@ async def _sync_logs_to_task(task_id: str):
                         # 实时查询采集到的数据量（task.total_crawled 字段不会被爬虫子进程更新，一直是0）
                         # 通过查询实际的 aweme/comment 表来统计
                         actual_crawled = 0
+                        x_run_status = ""
+                        x_run_error = ""
                         try:
                             if task.platform in ("dy", "douyin"):
                                 r = await session.execute(
@@ -1050,6 +1088,11 @@ async def _sync_logs_to_task(task_id: str):
                                     select(func.count()).select_from(TiebaNote).where(TiebaNote.task_id == task_id)
                                 )
                                 actual_crawled = r.scalar() or 0
+                            elif task.platform == "x":
+                                x_run = await _latest_x_task_run(session, task_id)
+                                actual_crawled = x_run["count"]
+                                x_run_status = x_run["status"]
+                                x_run_error = x_run["error"]
                         except Exception as e:
                             print(f"[tasks] Error counting actual crawled data: {e}")
                         
@@ -1057,7 +1100,13 @@ async def _sync_logs_to_task(task_id: str):
                         task.total_crawled = actual_crawled
                         
                         # 判断任务是否成功：有数据则 completed，无数据则 failed
-                        if actual_crawled > 0:
+                        if task.platform == "x" and x_run_status == "succeeded":
+                            task.status = "completed"
+                            task.error_message = ""
+                        elif task.platform == "x" and x_run_status == "failed":
+                            task.status = "failed"
+                            task.error_message = x_run_error[:500]
+                        elif actual_crawled > 0:
                             task.status = "completed"
                         else:
                             task.status = "failed"

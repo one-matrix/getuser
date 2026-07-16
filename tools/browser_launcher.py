@@ -190,14 +190,30 @@ class BrowserLauncher:
             # Fix: build a minimal clean environment to avoid IDE sandbox (Trae/VSCode)
             # injecting variables that cause Chrome GPU process to crash
             # (e.g. TRAE_SANDBOX_*, ICUBE_*, VSCODE_*, PYDEVD_*, etc.)
-            clean_env = {
-                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                "HOME": "/tmp",
-                "DISPLAY": os.environ.get("DISPLAY", ":0"),
-                "LD_LIBRARY_PATH": "/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
-                "LANG": os.environ.get("LANG", "en_US.UTF-8"),
-                "TERM": os.environ.get("TERM", "xterm-256color"),
-            }
+            if self.system == "Darwin":
+                # Chrome needs the real macOS user/session environment to access
+                # the login keychain that encrypts cookies and saved credentials.
+                blocked_prefixes = (
+                    "TRAE_SANDBOX_",
+                    "ICUBE_",
+                    "VSCODE_",
+                    "PYDEVD_",
+                )
+                clean_env = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if not key.startswith(blocked_prefixes)
+                }
+                clean_env["HOME"] = os.path.expanduser("~")
+            else:
+                clean_env = {
+                    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "HOME": os.path.expanduser("~"),
+                    "DISPLAY": os.environ.get("DISPLAY", ":0"),
+                    "LD_LIBRARY_PATH": "/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
+                    "LANG": os.environ.get("LANG", "en_US.UTF-8"),
+                    "TERM": os.environ.get("TERM", "xterm-256color"),
+                }
             # Preserve DBUS_SESSION_BUS_ADDRESS if set (needed for some Chrome features)
             if "DBUS_SESSION_BUS_ADDRESS" in os.environ:
                 clean_env["DBUS_SESSION_BUS_ADDRESS"] = os.environ["DBUS_SESSION_BUS_ADDRESS"]

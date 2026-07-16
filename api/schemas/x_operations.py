@@ -117,6 +117,18 @@ class XReviewRejectRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
 
 
+class XReviewFlagRequest(BaseModel):
+    action: str
+    reason: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, value: str) -> str:
+        if value not in {"fact_check", "block"}:
+            raise ValueError("action must be fact_check or block")
+        return value
+
+
 class XPublishRequest(BaseModel):
     candidate_id: int = Field(gt=0)
     content_hash: str = Field(min_length=64, max_length=128)

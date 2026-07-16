@@ -5,6 +5,7 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi import FastAPI
+from fastapi import HTTPException
 from sqlalchemy import text
 
 from api.services.x.policy_service import content_hash
@@ -18,6 +19,7 @@ from database.models import (
     XReplyCandidate,
     XReviewTask,
 )
+from media_platform.x.exception import XBrowserError
 
 
 @pytest.fixture(scope="session")
@@ -92,6 +94,20 @@ def test_write_rate_limit_endpoint_normalization_matches_usage_keys(x_router_mod
     )
 
 
+def test_browser_profile_conflict_is_returned_as_actionable_409(x_router_module):
+    with pytest.raises(HTTPException) as captured:
+        x_router_module._raise_x_browser_error(
+            XBrowserError(
+                "profile is open without CDP",
+                error_code="browser_profile_in_use_without_cdp",
+                retryable=True,
+            )
+        )
+
+    assert captured.value.status_code == 409
+    assert captured.value.detail["error_code"] == "browser_profile_in_use_without_cdp"
+
+
 @pytest.mark.asyncio
 async def test_policy_extras_survive_scalar_control_toggle(x_app_client):
     saved = await x_app_client.patch(
@@ -146,6 +162,84 @@ async def test_x_region_create_and_list_persists(x_app_client):
 
 
 @pytest.mark.asyncio
+async def test_browser_sync_creates_draft_only_account_without_oauth(
+    x_app_client,
+    x_router_module,
+    monkeypatch,
+):
+    class FakeBrowser:
+        @staticmethod
+        async def get_current_identity():
+            return {
+                "id": "web:brandbot",
+                "username": "brandbot",
+                "name": "Brand Bot",
+                "source": "browser_profile",
+            }
+
+    @asynccontextmanager
+    async def fake_browser_reader():
+        yield FakeBrowser()
+
+    monkeypatch.setattr(x_router_module, "_browser_reader", fake_browser_reader)
+    monkeypatch.setattr(
+        x_router_module,
+        "x_browser_profile_status",
+        lambda: {
+            "profile_source": "project_default",
+            "profile_dir": "/tmp/x-profile",
+            "profile_exists": True,
+            "cookie_store_detected": True,
+            "cdp_mode": True,
+            "connect_existing": False,
+            "debug_port": 9222,
+            "headless": False,
+            "browser_use_fallback_enabled": False,
+        },
+    )
+
+    synced = await x_app_client.post("/api/x/browser/sync-account")
+    assert synced.status_code == 200, synced.text
+    account = synced.json()["account"]
+    assert account["username"] == "brandbot"
+    assert account["write_enabled"] is False
+    assert account["auto_reply_enabled"] is False
+    assert account["token_configured"] is False
+    assert account["browser_synced"] is True
+
+    listed = await x_app_client.get("/api/x/accounts")
+    assert listed.status_code == 200
+    assert listed.json()["total"] == 1
+    assert listed.json()["items"][0]["username"] == "brandbot"
+
+    status = await x_app_client.get("/api/x/browser/status")
+    assert status.status_code == 200
+    assert status.json()["cookie_store_detected"] is True
+    assert status.json()["synced_account_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_open_browser_login_uses_dedicated_profile(
+    x_app_client,
+    x_router_module,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        x_router_module,
+        "launch_x_login_window",
+        lambda: {
+            "pid": 123,
+            "profile_dir": "/tmp/x-profile",
+            "browser_name": "Google Chrome",
+            "url": "https://x.com/home",
+        },
+    )
+    response = await x_app_client.post("/api/x/browser/open-login")
+    assert response.status_code == 200, response.text
+    assert response.json()["browser"]["profile_dir"] == "/tmp/x-profile"
+
+
+@pytest.mark.asyncio
 async def test_x_fallback_candidate_review_and_hash_bound_approval(x_app_client, monkeypatch):
     from config import x_config
 
@@ -190,6 +284,7 @@ async def test_x_fallback_candidate_review_and_hash_bound_approval(x_app_client,
     first = payload["items"][0]
     review_id = first["review"]["id"]
     candidate = first["candidate"]
+    blocked_review_id = payload["items"][1]["review"]["id"]
 
     listed = await x_app_client.get("/api/x/reviews")
     assert listed.status_code == 200
@@ -198,6 +293,22 @@ async def test_x_fallback_candidate_review_and_hash_bound_approval(x_app_client,
     assert review["post"]["x_post_id"] == "987654321"
     assert review["api_reply_eligible"] is True
     assert isinstance(review["policy_checks"], list)
+
+    fact_check = await x_app_client.post(
+        f"/api/x/reviews/{review_id}/flag",
+        json={"action": "fact_check", "reason": "verify product claim"},
+    )
+    assert fact_check.status_code == 200, fact_check.text
+    assert fact_check.json()["review"]["review_status"] == "needs_fact_check"
+    assert fact_check.json()["review"]["candidate"]["requires_fact_check"] is True
+
+    blocked = await x_app_client.post(
+        f"/api/x/reviews/{blocked_review_id}/flag",
+        json={"action": "block", "reason": "brand should not participate"},
+    )
+    assert blocked.status_code == 200, blocked.text
+    assert blocked.json()["review"]["review_status"] == "blocked"
+    assert blocked.json()["review"]["candidate"]["risk_level"] == "blocked"
 
     rejected_hash = await x_app_client.post(
         f"/api/x/reviews/{review_id}/approve",

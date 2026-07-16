@@ -4,6 +4,7 @@ import {
   Badge,
   Button,
   Card,
+  Checkbox,
   Col,
   Collapse,
   Divider,
@@ -61,35 +62,46 @@ import {
   approveXReview,
   collectXTopicPosts,
   collectXThread,
+  evaluateXInteraction,
+  flagXReview,
   generateXReplyCandidates,
   getXAccounts,
   getXAuditLogs,
   getXAutomationStatus,
+  getXBrowserStatus,
   getXConversation,
+  getXInteractions,
   getXPosts,
   getXReviews,
   getXTopics,
   getXUsage,
+  openXBrowserLogin,
+  optOutXUser,
   publishXReview,
+  refreshXInteractions,
   refreshXTopics,
   regenerateXReview,
   rejectXReview,
   saveXAccountApprovalEvidence,
   startXOAuth,
+  syncXBrowserAccount,
   testXAccount,
   updateXAccount,
   updateXAutomationControls,
   type XAccount,
   type XAuditLog,
   type XAutomationStatus,
+  type XBrowserStatus,
   type XConversation,
   type XEndpointUsage,
+  type XInteraction,
   type XPolicyCheck,
   type XPost,
   type XPublicMetrics,
   type XReplyCandidate,
   type XReviewTask,
   type XThreadAnalysis,
+  type XThreadNode,
   type XTopic,
   type XUsageSummary,
 } from '../api/xOperations';
@@ -249,6 +261,34 @@ function errorDetail(error: unknown): string {
     }
   }
   return err?.message || '请求失败';
+}
+
+function auditDetail(log: XAuditLog): string {
+  if (log.message) return log.message;
+  const metadata = parseMaybeJson<Record<string, unknown>>(log.metadata_json, {});
+  const after = parseMaybeJson<Record<string, unknown>>(log.after_state_json, {});
+  return String(
+    metadata.message
+    || metadata.error_message
+    || metadata.reason
+    || after.error_message
+    || after.reason
+    || log.outcome
+    || '未提供错误详情',
+  );
+}
+
+function auditHttpStatus(log: XAuditLog): number | undefined {
+  if (log.http_status) return log.http_status;
+  const metadata = parseMaybeJson<Record<string, unknown>>(log.metadata_json, {});
+  const value = Number(metadata.http_status || metadata.status_code || 0);
+  return value > 0 ? value : undefined;
+}
+
+function auditErrorCode(log: XAuditLog): string {
+  if (log.error_code) return log.error_code;
+  const metadata = parseMaybeJson<Record<string, unknown>>(log.metadata_json, {});
+  return String(metadata.error_code || '');
 }
 
 function formatDate(value?: string | number): string {
@@ -441,6 +481,29 @@ function policyChecks(review: XReviewTask): XPolicyCheck[] {
   return parseMaybeJson<XPolicyCheck[]>(review.policy_checks, []);
 }
 
+function interactionEligibility(interaction: XInteraction): Record<string, unknown> {
+  return parseMaybeJson<Record<string, unknown>>(interaction.eligibility_json, {});
+}
+
+function interactionEvidence(interaction: XInteraction): Record<string, unknown> {
+  return parseMaybeJson<Record<string, unknown>>(interaction.opt_in_evidence_json, {});
+}
+
+function interactionIntent(interaction: XInteraction): string {
+  const intent = interactionEvidence(interaction).intent;
+  if (!intent || typeof intent !== 'object') return '未分类';
+  const record = intent as Record<string, unknown>;
+  return String(record.label || record.code || '未分类');
+}
+
+function interactionStatusColor(status?: string): string {
+  const normalized = normalizeStatus(status);
+  if (normalized === 'ELIGIBLE') return 'success';
+  if (normalized === 'BLOCKED') return 'error';
+  if (['DRAFTED', 'REVIEWED', 'PUBLISHED'].includes(normalized)) return 'processing';
+  return 'default';
+}
+
 function percentOf(value?: number, budget?: number): number {
   if (!budget || budget <= 0) return 0;
   return Math.min(100, Math.max(0, Math.round(((value || 0) / budget) * 100)));
@@ -481,6 +544,40 @@ function ReviewStatusTag({ status }: { status?: string }) {
   );
 }
 
+function ThreadTreeList({ nodes, depth = 0 }: { nodes: XThreadNode[]; depth?: number }) {
+  return (
+    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+      {nodes.map((post) => (
+        <div
+          key={postIdentifier(post)}
+          style={{
+            marginLeft: Math.min(depth, 4) * 20,
+            padding: '10px 12px',
+            borderLeft: depth > 0 ? '2px solid rgba(22, 119, 255, 0.25)' : undefined,
+            borderRadius: 8,
+            background: depth % 2 === 0 ? 'rgba(0, 0, 0, 0.02)' : undefined,
+          }}
+        >
+          <Space wrap>
+            <Text strong>{postAuthorName(post)}</Text>
+            {post.author_username && <Text type="secondary">@{post.author_username}</Text>}
+            <Tag>{depth === 0 ? '直接回复' : `层级 ${depth + 1}`}</Tag>
+          </Space>
+          <Paragraph style={{ margin: '6px 0 2px', whiteSpace: 'pre-wrap' }}>
+            {post.text || '内容不可用'}
+          </Paragraph>
+          <Text type="secondary">{formatDate(post.created_at_x || post.created_at)}</Text>
+          {post.children?.length ? (
+            <div style={{ marginTop: 8 }}>
+              <ThreadTreeList nodes={post.children} depth={depth + 1} />
+            </div>
+          ) : null}
+        </div>
+      ))}
+    </Space>
+  );
+}
+
 export default function XOperations() {
   const {
     token: {
@@ -509,6 +606,8 @@ export default function XOperations() {
   const [posts, setPosts] = useState<XPost[]>([]);
   const [reviews, setReviews] = useState<XReviewTask[]>([]);
   const [accounts, setAccounts] = useState<XAccount[]>([]);
+  const [browserStatus, setBrowserStatus] = useState<XBrowserStatus>({});
+  const [interactions, setInteractions] = useState<XInteraction[]>([]);
   const [auditLogs, setAuditLogs] = useState<XAuditLog[]>([]);
   const [usage, setUsage] = useState<XUsageSummary>({});
   const [automation, setAutomation] = useState<XAutomationStatus>(SAFE_AUTOMATION_DEFAULTS);
@@ -518,6 +617,8 @@ export default function XOperations() {
   const [selectedAccountId, setSelectedAccountId] = useState<string | number>();
   const [postSearch, setPostSearch] = useState('');
   const [reviewStatus, setReviewStatus] = useState('ALL');
+  const [selectedReviewIds, setSelectedReviewIds] = useState<string[]>([]);
+  const [interactionStatus, setInteractionStatus] = useState('ALL');
   const [selectedPost, setSelectedPost] = useState<XPost | null>(null);
   const [conversation, setConversation] = useState<XConversation | null>(null);
   const [conversationLoading, setConversationLoading] = useState(false);
@@ -531,13 +632,15 @@ export default function XOperations() {
       getXPosts({ limit: 100 }),
       getXReviews({ limit: 100 }),
       getXAutomationStatus(),
+      getXBrowserStatus(),
       getXAccounts(),
+      getXInteractions({ limit: 100 }),
       getXUsage(),
       getXAuditLogs({ limit: 50 }),
     ]);
 
     const errors: string[] = [];
-    const labels = ['热点', '帖子', '审核队列', '安全状态', '账号', '预算', '审计日志'];
+    const labels = ['热点', '帖子', '审核队列', '安全状态', '浏览器会话', '账号', '主动互动', '预算', '审计日志'];
     results.forEach((result, index) => {
       if (result.status === 'rejected') {
         errors.push(`${labels[index]}：${errorDetail(result.reason)}`);
@@ -569,7 +672,10 @@ export default function XOperations() {
       setPolicyDraft(policyDraftFromStatus(SAFE_AUTOMATION_DEFAULTS));
     }
     if (results[4].status === 'fulfilled') {
-      const nextAccounts = listFromResponse<XAccount>(results[4].value, ['accounts']);
+      setBrowserStatus(results[4].value as XBrowserStatus);
+    }
+    if (results[5].status === 'fulfilled') {
+      const nextAccounts = listFromResponse<XAccount>(results[5].value, ['accounts']);
       setAccounts(nextAccounts);
       setSelectedAccountId((previous) => {
         if (previous != null && nextAccounts.some((account) => String(account.id) === String(previous))) {
@@ -579,8 +685,11 @@ export default function XOperations() {
           ?? nextAccounts[0]?.id;
       });
     }
-    if (results[5].status === 'fulfilled') {
-      const raw = results[5].value as XUsageSummary & {
+    if (results[6].status === 'fulfilled') {
+      setInteractions(listFromResponse<XInteraction>(results[6].value, ['interactions']));
+    }
+    if (results[7].status === 'fulfilled') {
+      const raw = results[7].value as XUsageSummary & {
         usage_date?: string;
         summary?: XUsageSummary & { read_resource_count?: number };
         items?: XEndpointUsage[];
@@ -632,12 +741,14 @@ export default function XOperations() {
         write_budget: raw.write_budget ?? raw.budgets?.writes,
         estimated_cost: raw.estimated_cost ?? estimatedCost,
         forced_read_only: raw.forced_read_only
-          ?? Boolean(raw.budgets?.post_reads_status?.exhausted || raw.budgets?.writes_status?.exhausted),
+          ?? Boolean(raw.budgets?.post_reads_status?.exhausted),
+        write_budget_exhausted: raw.write_budget_exhausted
+          ?? Boolean(raw.budgets?.writes_status?.exhausted),
         endpoints: enrichedItems,
       });
     }
-    if (results[6].status === 'fulfilled') {
-      setAuditLogs(listFromResponse<XAuditLog>(results[6].value, ['logs', 'audit_logs']));
+    if (results[8].status === 'fulfilled') {
+      setAuditLogs(listFromResponse<XAuditLog>(results[8].value, ['logs', 'audit_logs']));
     }
 
     setLoadErrors(Array.from(new Set(errors)));
@@ -698,10 +809,13 @@ export default function XOperations() {
     try {
       const response = await getXConversation(rootPostId);
       const raw = response as XConversation & { conversation?: Record<string, unknown> };
+      const responsePosts = listFromResponse<XPost>(raw.posts, ['posts']);
+      const rootPost = responsePosts.find((item) => postIdentifier(item) === String(rootPostId)) || post;
+      setSelectedPost(rootPost);
       setConversation({
         ...raw,
-        root_post: raw.root_post || post,
-        posts: listFromResponse<XPost>(raw.posts, ['posts']),
+        root_post: raw.root_post || rootPost,
+        posts: responsePosts,
         analysis: normalizeAnalysis(raw.analysis),
       });
     } catch {
@@ -741,11 +855,14 @@ export default function XOperations() {
       false,
     ) as (XConversation & { conversation?: Record<string, unknown> }) | null;
     if (!result) return;
-    setSelectedPost(post);
+    const responsePosts = listFromResponse<XPost>(result.posts, ['posts']);
+    const rootPostId = post.conversation_id || postIdentifier(post);
+    const rootPost = responsePosts.find((item) => postIdentifier(item) === String(rootPostId)) || post;
+    setSelectedPost(rootPost);
     setConversation({
       ...result,
-      root_post: post,
-      posts: listFromResponse<XPost>(result.posts, ['posts']),
+      root_post: rootPost,
+      posts: responsePosts,
       analysis: normalizeAnalysis(result.analysis),
     });
   };
@@ -765,6 +882,83 @@ export default function XOperations() {
       '已生成 3 条候选并进入审核队列',
     );
     if (result) setActiveTab('reviews');
+  };
+
+  const handleOpenBrowserLogin = async () => {
+    await runAction(
+      'browser-open-login',
+      () => openXBrowserLogin(),
+      '已打开专用 X 登录窗口',
+    );
+  };
+
+  const handleSyncBrowserAccount = async () => {
+    const result = await runAction(
+      'browser-sync',
+      () => syncXBrowserAccount(),
+      '浏览器登录账号已同步',
+    );
+    if (result) setActiveTab('accounts');
+  };
+
+  const handleRefreshInteractions = async () => {
+    if (selectedAccountId == null) {
+      messageApi.warning('请先检测并同步浏览器账号');
+      setActiveTab('accounts');
+      return;
+    }
+    const result = await runAction(
+      'refresh-interactions',
+      () => refreshXInteractions({
+        account_id: selectedAccountId,
+        max_posts: 50,
+      }),
+      'mentions 已完成增量采集',
+    );
+    if (result) setActiveTab('interactions');
+  };
+
+  const handleEvaluateInteraction = async (interaction: XInteraction) => {
+    await runAction(
+      `evaluate-interaction-${interaction.id}`,
+      () => evaluateXInteraction(interaction.id),
+      '互动资格已重新评估',
+    );
+  };
+
+  const handleGenerateInteractionReply = async (interaction: XInteraction) => {
+    const post = interaction.post;
+    if (!post?.id) {
+      messageApi.warning('该互动缺少本地帖子记录，无法生成草稿');
+      return;
+    }
+    const result = await runAction(
+      `generate-interaction-${interaction.id}`,
+      () => generateXReplyCandidates(post.id, {
+        account_id: interaction.account_id,
+        candidate_count: 3,
+      }),
+      '已生成 3 条候选并进入人工审核队列',
+    );
+    if (result) setActiveTab('reviews');
+  };
+
+  const handleOptOutInteractionUser = async (interaction: XInteraction) => {
+    if (!interaction.actor_x_user_id) {
+      messageApi.warning('该互动缺少用户 ID，无法写入退出名单');
+      return;
+    }
+    await runAction(
+      `opt-out-${interaction.id}`,
+      () => optOutXUser(interaction.actor_x_user_id!, {
+        account_id: interaction.account_id,
+        source_interaction_id: interaction.id,
+        source_post_id: interaction.interaction_post_id,
+        detected_phrase: 'manual opt-out from X operations UI',
+        evidence: { source: 'x_operations_ui' },
+      }),
+      '该用户已加入停止互动名单',
+    );
   };
 
   const getReviewDraft = (review: XReviewTask): ReviewDraft => {
@@ -849,6 +1043,97 @@ export default function XOperations() {
           '审核已拒绝',
         );
         if (!result) return Promise.reject();
+      },
+    });
+  };
+
+  const showReviewFlagDialog = (
+    review: XReviewTask,
+    action: 'fact_check' | 'block',
+  ) => {
+    let reason = '';
+    const isBlock = action === 'block';
+    modal.confirm({
+      title: isBlock ? '标记禁止参与' : '要求事实核验',
+      icon: isBlock
+        ? <StopOutlined style={{ color: '#ff4d4f' }} />
+        : <WarningOutlined style={{ color: '#faad14' }} />,
+      content: (
+        <div style={{ marginTop: 16 }}>
+          <Paragraph type="secondary">
+            {isBlock
+              ? '禁止参与会使当前候选失效，后续不能批准或发布。'
+              : '标记后仍可在完成核验、修订文本后重新批准。'}
+          </Paragraph>
+          <TextArea
+            rows={3}
+            placeholder={isBlock ? '请输入禁止参与原因' : '请输入需要核验的事实或依据'}
+            onChange={(event) => { reason = event.target.value; }}
+          />
+        </div>
+      ),
+      okText: isBlock ? '确认阻断' : '确认标记',
+      cancelText: '取消',
+      okButtonProps: { danger: isBlock },
+      onOk: async () => {
+        if (!reason.trim()) {
+          messageApi.warning('请输入原因');
+          return Promise.reject();
+        }
+        const result = await runAction(
+          `flag-${action}-${review.id}`,
+          () => flagXReview(review.id, { action, reason: reason.trim() }),
+          isBlock ? '已标记禁止参与' : '已标记需要事实核验',
+        );
+        if (!result) return Promise.reject();
+      },
+    });
+  };
+
+  const showBatchRejectDialog = () => {
+    let reason = '';
+    modal.confirm({
+      title: `批量拒绝 ${selectedReviewIds.length} 条审核任务`,
+      icon: <CloseCircleOutlined style={{ color: '#ff4d4f' }} />,
+      content: (
+        <div style={{ marginTop: 16 }}>
+          <Alert
+            type="warning"
+            showIcon
+            message="只会批量拒绝，不会批量批准或发布"
+            style={{ marginBottom: 12 }}
+          />
+          <TextArea
+            rows={3}
+            placeholder="请输入统一拒绝原因"
+            onChange={(event) => { reason = event.target.value; }}
+          />
+        </div>
+      ),
+      okText: '确认批量拒绝',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        if (!reason.trim()) {
+          messageApi.warning('请输入拒绝原因');
+          return Promise.reject();
+        }
+        setActionLoading('batch-reject');
+        let completed = 0;
+        try {
+          for (const reviewId of selectedReviewIds) {
+            await rejectXReview(reviewId, { reason: reason.trim() });
+            completed += 1;
+          }
+          setSelectedReviewIds([]);
+          messageApi.success(`已拒绝 ${completed} 条审核任务`);
+          await loadAll(false);
+        } catch (error) {
+          messageApi.error(`已完成 ${completed} 条；后续失败：${errorDetail(error)}`);
+          return Promise.reject();
+        } finally {
+          setActionLoading('');
+        }
       },
     });
   };
@@ -1051,6 +1336,16 @@ export default function XOperations() {
     return reviews.filter((review) => normalizeStatus(review.status || review.review_status) === reviewStatus);
   }, [reviewStatus, reviews]);
 
+  const filteredInteractions = useMemo(() => {
+    if (interactionStatus === 'ALL') return interactions;
+    return interactions.filter((interaction) => normalizeStatus(interaction.status) === interactionStatus);
+  }, [interactionStatus, interactions]);
+
+  const eligibleInteractionCount = useMemo(
+    () => interactions.filter((interaction) => normalizeStatus(interaction.status) === 'ELIGIBLE').length,
+    [interactions],
+  );
+
   const pendingReviewCount = useMemo(() => reviews.filter((review) => {
     const status = normalizeStatus(review.status || review.review_status);
     return ['PENDING', 'IN_REVIEW', 'NEW', 'AI_GENERATED', 'NEEDS_FACT_CHECK', 'NEEDS_REVIEW', 'PUBLISH_FAILED'].includes(status);
@@ -1075,9 +1370,9 @@ export default function XOperations() {
   const recentErrors = [
     ...(usage.recent_errors || []),
     ...auditLogs.filter((log) => (
-      (log.http_status || 0) >= 400
+      (auditHttpStatus(log) || 0) >= 400
       || ['FAILED', 'ERROR', 'BLOCKED'].includes(normalizeStatus(log.status || log.outcome))
-      || Boolean(log.error_code)
+      || Boolean(auditErrorCode(log))
     )),
   ].slice(0, 10);
 
@@ -1089,6 +1384,13 @@ export default function XOperations() {
     postIdentifier(post) !== postIdentifier(selectedPost)
     && all.findIndex((item) => postIdentifier(item) === postIdentifier(post)) === index
   ));
+  const conversationTree = conversation?.tree || [];
+  const treeRoot = conversationTree.find(
+    (node) => postIdentifier(node) === postIdentifier(selectedPost),
+  );
+  const threadTreeNodes = treeRoot?.children?.length
+    ? treeRoot.children
+    : conversationTree.filter((node) => postIdentifier(node) !== postIdentifier(selectedPost));
 
   const safetyAlertType = automation.global_kill_switch
     ? 'error'
@@ -1525,7 +1827,9 @@ export default function XOperations() {
                         <Text type="secondary">{formatDate(selectedPost.created_at_x || selectedPost.created_at)}</Text>
                       </Space>
                     </Card>
-                    {threadPosts.length ? (
+                    {threadTreeNodes.length ? (
+                      <ThreadTreeList nodes={threadTreeNodes} />
+                    ) : threadPosts.length ? (
                       <List
                         size="small"
                         dataSource={threadPosts}
@@ -1616,6 +1920,223 @@ export default function XOperations() {
       ),
     },
     {
+      key: 'interactions',
+      label: (
+        <Space size={6}>
+          <MessageOutlined />
+          主动互动
+          {eligibleInteractionCount > 0 && <Badge count={eligibleInteractionCount} size="small" />}
+        </Space>
+      ),
+      children: (
+        <div>
+          <Alert
+            type="info"
+            showIcon
+            message="mentions 只采集和生成草稿，不会自动发布"
+            description="仅处理用户主动 @、引用或回复。生成的候选必须进入人工审核队列；当前页面不会创建自动发布任务。"
+            style={{ marginBottom: 16 }}
+          />
+          <Card size="small" style={{ marginBottom: 16 }}>
+            <Row gutter={[12, 12]} align="middle">
+              <Col xs={24} md={9}>
+                <Select
+                  style={{ width: '100%' }}
+                  placeholder="选择采集 mentions 的浏览器账号"
+                  value={selectedAccountId}
+                  onChange={setSelectedAccountId}
+                  options={accounts.map((account) => ({
+                    value: account.id,
+                    label: `${account.display_name || account.username || `账号 ${account.id}`}${account.username ? ` (@${account.username})` : ''}`,
+                    disabled: account.status != null && account.status !== 'active',
+                  }))}
+                  notFoundContent="请先在账号与用量中同步浏览器账号"
+                />
+              </Col>
+              <Col>
+                <Select
+                  value={interactionStatus}
+                  style={{ minWidth: 150 }}
+                  onChange={setInteractionStatus}
+                  options={[
+                    { value: 'ALL', label: '全部状态' },
+                    { value: 'PENDING', label: '待评估' },
+                    { value: 'ELIGIBLE', label: '可生成草稿' },
+                    { value: 'BLOCKED', label: '已阻断' },
+                    { value: 'DRAFTED', label: '已生成' },
+                    { value: 'PUBLISHED', label: '已发布' },
+                  ]}
+                />
+              </Col>
+              <Col>
+                <Popconfirm
+                  title="确认增量采集 mentions？"
+                  description="使用专用浏览器读取 notifications/mentions，最多采集 50 条；不会自动生成或发布回复。"
+                  okText="确认采集"
+                  cancelText="取消"
+                  onConfirm={handleRefreshInteractions}
+                >
+                  <Button
+                    type="primary"
+                    icon={<SyncOutlined />}
+                    disabled={!canOperate || !automation.read_enabled || selectedAccountId == null}
+                    loading={actionLoading === 'refresh-interactions'}
+                  >
+                    刷新 mentions
+                  </Button>
+                </Popconfirm>
+              </Col>
+            </Row>
+          </Card>
+
+          <Table<XInteraction>
+            rowKey={(record) => String(record.id)}
+            dataSource={filteredInteractions}
+            locale={{ emptyText: <Empty description="暂无主动互动，请先同步浏览器账号并刷新 mentions" /> }}
+            scroll={{ x: 1220 }}
+            pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (total) => `共 ${total} 条互动` }}
+            columns={[
+              {
+                title: '互动',
+                key: 'interaction',
+                width: 160,
+                render: (_, record) => (
+                  <Space direction="vertical" size={2}>
+                    <Tag>{record.interaction_type || 'mention'}</Tag>
+                    <Text type="secondary">{formatDate(record.received_at || record.created_at)}</Text>
+                  </Space>
+                ),
+              },
+              {
+                title: '用户 / 内容',
+                key: 'post',
+                width: 430,
+                render: (_, record) => (
+                  <div>
+                    <Space wrap>
+                      <Text strong>
+                        {record.post?.author_username
+                          ? `@${record.post.author_username}`
+                          : record.actor_x_user_id || '未知用户'}
+                      </Text>
+                      {record.post?.lang && <Tag>{record.post.lang}</Tag>}
+                    </Space>
+                    <Paragraph ellipsis={{ rows: 3 }} style={{ margin: '6px 0 0' }}>
+                      {record.post?.text || '互动正文尚未同步'}
+                    </Paragraph>
+                  </div>
+                ),
+              },
+              {
+                title: '意图',
+                key: 'intent',
+                width: 150,
+                render: (_, record) => <Tag color="blue">{interactionIntent(record)}</Tag>,
+              },
+              {
+                title: '资格证据',
+                key: 'eligibility',
+                width: 240,
+                render: (_, record) => {
+                  const eligibility = interactionEligibility(record);
+                  const reasons = Array.isArray(eligibility.reasons)
+                    ? eligibility.reasons.map(String)
+                    : [];
+                  const eligible = eligibility.eligible === true && !record.is_opted_out;
+                  return (
+                    <Space direction="vertical" size={4}>
+                      <Tag color={eligible ? 'success' : 'warning'}>
+                        {eligible ? '用户主动互动，可生成草稿' : '不满足受控回复资格'}
+                      </Tag>
+                      {reasons.length > 0 && (
+                        <Text type="secondary" ellipsis={{ tooltip: reasons.join('；') }} style={{ maxWidth: 220 }}>
+                          {reasons.join('；')}
+                        </Text>
+                      )}
+                      {record.is_opted_out && <Tag color="error">用户已退出互动</Tag>}
+                    </Space>
+                  );
+                },
+              },
+              {
+                title: '状态',
+                dataIndex: 'status',
+                width: 110,
+                render: (value: string) => (
+                  <Tag color={interactionStatusColor(value)}>{value || 'pending'}</Tag>
+                ),
+              },
+              {
+                title: '操作',
+                key: 'actions',
+                fixed: 'right',
+                width: 300,
+                render: (_, record) => {
+                  const eligible = interactionEligibility(record).eligible === true
+                    && !record.is_opted_out;
+                  return (
+                    <Space wrap>
+                      <Button
+                        size="small"
+                        icon={<SafetyCertificateOutlined />}
+                        disabled={!canOperate}
+                        loading={actionLoading === `evaluate-interaction-${record.id}`}
+                        onClick={() => void handleEvaluateInteraction(record)}
+                      >
+                        重新评估
+                      </Button>
+                      <Popconfirm
+                        title="确认生成 3 条 AI 回复草稿？"
+                        description="只进入人工审核队列，不会自动发布。"
+                        okText="确认生成"
+                        cancelText="取消"
+                        onConfirm={() => handleGenerateInteractionReply(record)}
+                      >
+                        <Button
+                          size="small"
+                          type="primary"
+                          ghost
+                          icon={<RobotOutlined />}
+                          disabled={!canOperate || !eligible || !draftEngineAvailable || !record.post?.id}
+                          loading={actionLoading === `generate-interaction-${record.id}`}
+                        >
+                          生成回复
+                        </Button>
+                      </Popconfirm>
+                      <Button
+                        size="small"
+                        icon={<ExportOutlined />}
+                        onClick={() => window.open(postLink(record.post, record.interaction_post_id), '_blank', 'noopener,noreferrer')}
+                      >
+                        原帖
+                      </Button>
+                      <Popconfirm
+                        title="确认停止与该用户互动？"
+                        description="该用户的现有互动会被阻断，后续 mentions 也不会进入回复候选。"
+                        okText="确认停止"
+                        cancelText="取消"
+                        okButtonProps={{ danger: true }}
+                        onConfirm={() => handleOptOutInteractionUser(record)}
+                      >
+                        <Button
+                          size="small"
+                          danger
+                          disabled={!canOperate || record.is_opted_out || !record.actor_x_user_id}
+                          loading={actionLoading === `opt-out-${record.id}`}
+                        >
+                          停止互动
+                        </Button>
+                      </Popconfirm>
+                    </Space>
+                  );
+                },
+              },
+            ]}
+          />
+        </div>
+      ),
+    },
+    {
       key: 'reviews',
       label: (
         <Space size={6}>
@@ -1648,6 +2169,15 @@ export default function XOperations() {
               <Button icon={<ReloadOutlined />} onClick={() => void loadAll(false)} loading={refreshing}>
                 刷新队列
               </Button>
+              <Button
+                danger
+                icon={<CloseCircleOutlined />}
+                disabled={!canOperate || selectedReviewIds.length === 0}
+                loading={actionLoading === 'batch-reject'}
+                onClick={showBatchRejectDialog}
+              >
+                批量拒绝 ({selectedReviewIds.length})
+              </Button>
             </Space>
           </Card>
 
@@ -1666,6 +2196,7 @@ export default function XOperations() {
                 && draft.text.trim() !== review.final_text?.trim();
               const reviewAccountWriteReady = review.account?.status === 'active'
                 && review.account?.write_enabled === true;
+              const selectable = !['REJECTED', 'PUBLISHED', 'PUBLISHING', 'CANCELLED'].includes(status);
               const canApprove = canOperate
                 && [
                   'PENDING',
@@ -1702,6 +2233,19 @@ export default function XOperations() {
                   <Card
                     title={(
                       <Space wrap>
+                        {selectable && (
+                          <Checkbox
+                            checked={selectedReviewIds.includes(String(review.id))}
+                            onChange={(event) => {
+                              const id = String(review.id);
+                              setSelectedReviewIds((previous) => (
+                                event.target.checked
+                                  ? Array.from(new Set([...previous, id]))
+                                  : previous.filter((item) => item !== id)
+                              ));
+                            }}
+                          />
+                        )}
                         <ReviewStatusTag status={status} />
                         <RiskTag risk={review.risk_level || selectedCandidate?.risk_level || selectedCandidate?.risk} />
                         <Text>目标帖子 {reviewTargetId(review) || '未知'}</Text>
@@ -1880,6 +2424,25 @@ export default function XOperations() {
                             onClick={() => showRejectDialog(review)}
                           >
                             拒绝
+                          </Button>
+
+                          <Button
+                            icon={<WarningOutlined />}
+                            disabled={!canOperate || ['REJECTED', 'BLOCKED', 'PUBLISHED', 'PUBLISHING'].includes(status)}
+                            loading={actionLoading === `flag-fact_check-${review.id}`}
+                            onClick={() => showReviewFlagDialog(review, 'fact_check')}
+                          >
+                            事实核验
+                          </Button>
+
+                          <Button
+                            danger
+                            icon={<StopOutlined />}
+                            disabled={!canOperate || ['REJECTED', 'BLOCKED', 'PUBLISHED', 'PUBLISHING'].includes(status)}
+                            loading={actionLoading === `flag-block-${review.id}`}
+                            onClick={() => showReviewFlagDialog(review, 'block')}
+                          >
+                            禁止参与
                           </Button>
 
                           <Button icon={<CopyOutlined />} onClick={() => void copyDraft(review)}>
@@ -2217,6 +2780,100 @@ export default function XOperations() {
       ),
       children: (
         <div>
+          <Card
+            title={<Space><GlobalOutlined /> 浏览器采集会话</Space>}
+            style={{ marginBottom: 16 }}
+            extra={(
+              <Space wrap>
+                <Button
+                  icon={<GlobalOutlined />}
+                  disabled={!canOperate}
+                  loading={actionLoading === 'browser-open-login'}
+                  onClick={() => void handleOpenBrowserLogin()}
+                >
+                  打开专用 X 登录窗口
+                </Button>
+                <Button
+                  type="primary"
+                  icon={<ThunderboltOutlined />}
+                  disabled={
+                    !canOperate
+                    || !automation.read_enabled
+                    || (browserStatus.profile_in_use && !browserStatus.cdp_ready)
+                  }
+                  loading={actionLoading === 'browser-sync'}
+                  onClick={() => void handleSyncBrowserAccount()}
+                >
+                  检测登录并同步账号
+                </Button>
+              </Space>
+            )}
+          >
+            <Alert
+              type={
+                browserStatus.profile_in_use && browserStatus.cdp_ready
+                  ? 'success'
+                  : browserStatus.profile_in_use
+                    ? 'warning'
+                    : browserStatus.cookie_store_detected
+                      ? 'info'
+                      : 'warning'
+              }
+              showIcon
+              message={browserStatus.profile_in_use && browserStatus.cdp_ready
+                ? `专用 X 浏览器已连接 CDP :${browserStatus.debug_port || 9222}，可以保持窗口打开`
+                : browserStatus.profile_in_use
+                  ? '专用 X Profile 被未开启 CDP 的浏览器占用，请关闭后重新打开'
+                : browserStatus.cookie_store_detected
+                  ? '已检测到专用浏览器 Cookie 存储；仍需执行登录检测确认 X 会话有效'
+                  : '尚未检测到专用浏览器登录数据'}
+              description="系统不会复制普通 Chrome 的 Cookie。首次使用请打开专用窗口登录 X；窗口开启 CDP 后可保持运行，直接检测账号、刷新热点和采集评论。同步只创建采集/AI 草稿账号，不创建 OAuth Token，也不会开启写入。"
+              style={{ marginBottom: 16 }}
+            />
+            <Row gutter={[16, 12]}>
+              <Col xs={24} md={12} xl={8}>
+                <Text type="secondary">Profile</Text>
+                <Paragraph code copyable style={{ margin: '4px 0 0' }}>
+                  {browserStatus.profile_dir || '尚未返回'}
+                </Paragraph>
+              </Col>
+              <Col xs={12} md={6} xl={4}>
+                <Text type="secondary">启动方式</Text>
+                <div style={{ marginTop: 6 }}>
+                  <Tag color={browserStatus.cdp_mode ? 'blue' : 'default'}>
+                    {browserStatus.cdp_mode ? 'Playwright + CDP' : 'Playwright'}
+                  </Tag>
+                </div>
+              </Col>
+              <Col xs={12} md={6} xl={4}>
+                <Text type="secondary">已有浏览器连接</Text>
+                <div style={{ marginTop: 6 }}>
+                  <Tag color={browserStatus.connect_existing ? 'success' : 'default'}>
+                    {browserStatus.connect_existing
+                      ? `CDP :${browserStatus.debug_port || 9222}`
+                      : '使用专用 Profile'}
+                  </Tag>
+                </div>
+              </Col>
+              <Col xs={12} md={6} xl={4}>
+                <Text type="secondary">浏览器账号</Text>
+                <div style={{ marginTop: 6 }}>
+                  <Tag color={(browserStatus.synced_account_count || 0) > 0 ? 'success' : 'default'}>
+                    已同步 {browserStatus.synced_account_count || 0}
+                  </Tag>
+                </div>
+              </Col>
+              <Col xs={12} md={6} xl={4}>
+                <Text type="secondary">LLM</Text>
+                <div style={{ marginTop: 6 }}>
+                  <Tag color={browserStatus.llm_configured ? 'success' : 'error'}>
+                    {browserStatus.llm_configured ? '已配置' : '未配置'}
+                  </Tag>
+                </div>
+              </Col>
+            </Row>
+          </Card>
+
           <Row gutter={[16, 16]}>
             <Col xs={24} sm={12} xl={6}>
               <Card>
@@ -2285,6 +2942,14 @@ export default function XOperations() {
               style={{ marginTop: 16 }}
             />
           )}
+          {usage.write_budget_exhausted && (
+            <Alert
+              type="warning"
+              showIcon
+              message="本日写入预算已达到上限；浏览器采集仍可继续"
+              style={{ marginTop: 16 }}
+            />
+          )}
 
           <Card
             title={<Space><ApiOutlined /> OAuth 账号</Space>}
@@ -2293,7 +2958,7 @@ export default function XOperations() {
               <Button
                 type="primary"
                 icon={<GlobalOutlined />}
-                disabled={!isAdmin}
+                disabled={!isAdmin || !automation.credentials?.x_client_id || !automation.credentials?.token_encryption_key}
                 loading={actionLoading === 'oauth'}
                 onClick={() => {
                   modal.confirm({
@@ -2309,10 +2974,19 @@ export default function XOperations() {
               </Button>
             )}
           >
+            {(!automation.credentials?.x_client_id || !automation.credentials?.token_encryption_key) && (
+              <Alert
+                type="info"
+                showIcon
+                message="OAuth 写入未配置；浏览器采集和 AI 草稿仍可正常使用"
+                description="只有需要通过官方写入接口发布时，才需要配置 X_CLIENT_ID、回调地址和 TOKEN_ENCRYPTION_KEY。"
+                style={{ marginBottom: 12 }}
+              />
+            )}
             <Table<XAccount>
               rowKey={(record) => String(record.id)}
               dataSource={accounts}
-              locale={{ emptyText: <Empty description="尚未绑定 X OAuth 账号" /> }}
+              locale={{ emptyText: <Empty description="尚未同步浏览器账号或绑定 OAuth 账号" /> }}
               pagination={false}
               scroll={{ x: 1320 }}
               columns={[
@@ -2324,6 +2998,7 @@ export default function XOperations() {
                     <Space direction="vertical" size={0}>
                       <Text strong>{record.display_name || record.username || `账号 ${record.id}`}</Text>
                       {record.username && <Text type="secondary">@{record.username}</Text>}
+                      {!record.token_configured && <Tag color="blue">浏览器草稿账号</Tag>}
                     </Space>
                   ),
                 },
@@ -2339,7 +3014,7 @@ export default function XOperations() {
                         checked={Boolean(record.write_enabled)}
                         checkedChildren="可写"
                         unCheckedChildren="只读"
-                        disabled={!isAdmin || record.status !== 'active'}
+                        disabled={!isAdmin || record.status !== 'active' || !record.token_configured}
                         loading={actionLoading === `account-write_enabled-${record.id}`}
                         onChange={(checked) => confirmAccountToggle(record, 'write_enabled', checked, '写入')}
                       />
@@ -2430,11 +3105,11 @@ export default function XOperations() {
                   title: '操作',
                   key: 'actions',
                   fixed: 'right',
-                  width: 120,
-                  render: (_, record) => (
+                  width: 150,
+                  render: (_, record) => record.token_configured ? (
                     <Popconfirm
-                      title="确认测试账号连接？"
-                      description="只验证 Token、scope 和账号状态，不会发布内容。"
+                      title="确认测试 OAuth 写入账号连接？"
+                      description="验证 Token、scope 和浏览器身份，不会发布内容。"
                       okText="确认测试"
                       cancelText="取消"
                       onConfirm={() => runAction(
@@ -2448,9 +3123,22 @@ export default function XOperations() {
                         loading={actionLoading === `test-account-${record.id}`}
                         disabled={!isAdmin}
                       >
-                        测试
+                        测试 OAuth
                       </Button>
                     </Popconfirm>
+                  ) : (
+                    <Button
+                      icon={<ThunderboltOutlined />}
+                      loading={actionLoading === 'browser-sync'}
+                      disabled={
+                        !canOperate
+                        || !automation.read_enabled
+                        || (browserStatus.profile_in_use && !browserStatus.cdp_ready)
+                      }
+                      onClick={() => void handleSyncBrowserAccount()}
+                    >
+                      检测浏览器
+                    </Button>
                   ),
                 },
               ]}
@@ -2517,15 +3205,15 @@ export default function XOperations() {
                         avatar={<WarningOutlined style={{ color: '#faad14' }} />}
                         title={(
                           <Space wrap>
-                            {log.http_status && <Tag color="error">{log.http_status}</Tag>}
-                            {log.error_code && <Tag>{log.error_code}</Tag>}
+                            {auditHttpStatus(log) && <Tag color="error">{auditHttpStatus(log)}</Tag>}
+                            {auditErrorCode(log) && <Tag>{auditErrorCode(log)}</Tag>}
                             <Text>{log.action || 'X 运行任务'}</Text>
                           </Space>
                         )}
                         description={(
                           <div>
                             <Paragraph ellipsis={{ rows: 2 }} style={{ margin: 0 }}>
-                              {log.message || '未提供错误详情'}
+                              {auditDetail(log)}
                             </Paragraph>
                             <Text type="secondary">{formatDate(log.created_at)}</Text>
                           </div>

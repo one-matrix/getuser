@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 import config
+from sqlalchemy import or_, select
 from api.services.x.collection_service import XCollectionService, XReadClient
 from base.base_crawler import AbstractBrowserCrawler
 from config import x_config
+from database.models import XSystemControl
 
 from .browser_client import XBrowserClient
 from .browser_session import open_x_browser
@@ -48,6 +51,27 @@ class XBrowserCrawler(AbstractBrowserCrawler):
         self._clock_ms = clock_ms
         self.cdp_manager: Optional[CDPBrowserManager] = None
         self.browser_context: Optional[BrowserContext] = None
+
+    async def _read_allowed(self, owner_user_id: str) -> bool:
+        if not x_config.X_READ_ENABLED:
+            return False
+        session_factory = self._session_factory or default_session_factory()
+        now = int(time.time() * 1000)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(XSystemControl.enabled)
+                .where(
+                    XSystemControl.owner_user_id == owner_user_id,
+                    XSystemControl.scope_type == "global",
+                    XSystemControl.scope_key == "*",
+                    XSystemControl.control_name == "read_enabled",
+                    or_(XSystemControl.expires_at == 0, XSystemControl.expires_at > now),
+                )
+                .order_by(XSystemControl.updated_at.desc(), XSystemControl.id.desc())
+                .limit(1)
+            )
+            tenant_value = result.scalar_one_or_none()
+        return True if tenant_value is None else bool(tenant_value)
 
     async def start(self) -> Dict[str, Any]:
         if self.client is not None:
@@ -94,8 +118,8 @@ class XBrowserCrawler(AbstractBrowserCrawler):
         self.client = client
         self.collection_service = XCollectionService(client)
         try:
-            if not x_config.X_READ_ENABLED:
-                raise PermissionError("X_READ_ENABLED is false")
+            if not await self._read_allowed(owner_user_id):
+                raise PermissionError("X browser reading is disabled by environment or tenant control")
             if crawler_type == "search":
                 return await self._run_search(
                     persistence,

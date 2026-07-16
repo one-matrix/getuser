@@ -17,6 +17,7 @@ from database.models import (
     XPost,
     XRateLimitState,
     XRegion,
+    XSystemControl,
     XTopic,
     XTopicSnapshot,
 )
@@ -33,6 +34,7 @@ X_PERSISTENCE_TABLES = (
     XJob.__table__,
     XApiUsageDaily.__table__,
     XRateLimitState.__table__,
+    XSystemControl.__table__,
 )
 
 
@@ -282,6 +284,48 @@ async def test_search_failure_is_recorded_on_x_job(
     assert job.status == "failed"
     assert job.lease_owner == ""
     assert "unavailable" in job.last_error
+
+
+@pytest.mark.asyncio
+async def test_tenant_read_control_blocks_task_crawler(
+    x_persistence_store,
+    monkeypatch,
+):
+    _, factory = x_persistence_store
+    monkeypatch.setattr(config, "CRAWLER_TYPE", "search")
+    monkeypatch.setattr(config, "KEYWORDS", "MediaCrawler")
+    monkeypatch.setattr(x_config, "X_READ_ENABLED", True)
+    monkeypatch.delenv("X_CRAWLER_MODE", raising=False)
+    monkeypatch.delenv("X_SEARCH_TOPIC", raising=False)
+    async with factory() as session:
+        session.add(
+            XSystemControl(
+                owner_user_id="owner-disabled",
+                scope_type="global",
+                scope_key="*",
+                control_name="read_enabled",
+                enabled=False,
+                expires_at=0,
+                created_at=1,
+                updated_at=1,
+            )
+        )
+        await session.commit()
+
+    client = FakeXClient()
+    crawler = XBrowserCrawler(
+        client,
+        session_factory=factory,
+        owner_user_id="owner-disabled",
+        task_id="task-disabled",
+    )
+    with pytest.raises(PermissionError, match="disabled"):
+        await crawler.start()
+
+    assert client.search_calls == 0
+    async with factory() as session:
+        job = (await session.execute(select(XJob))).scalar_one()
+    assert job.status == "failed"
 
 
 @pytest.mark.asyncio

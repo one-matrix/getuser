@@ -17,6 +17,11 @@
 # 详细许可条款请参阅项目根目录下的LICENSE文件。
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
+from dotenv import load_dotenv
+
+# Load repository environment values before importing modules that read
+# variables at import time (notably x_config via base_config).
+load_dotenv()
 
 from .base_config import *
 from .db_config import *

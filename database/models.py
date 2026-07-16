@@ -998,7 +998,7 @@ class XTopicSnapshot(Base):
 
 
 class XPost(Base):
-    """通过 X 官方 API 读取的帖子、回复、引用和最小作者快照。"""
+    """通过 X 浏览器页面采集的帖子、回复、引用和最小作者快照。"""
     __tablename__ = 'x_posts'
     __table_args__ = (
         UniqueConstraint('owner_user_id', 'x_post_id', name='uq_x_posts_owner_x_post'),
