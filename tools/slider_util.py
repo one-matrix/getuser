@@ -23,12 +23,23 @@
 # @Time    : 2023/12/2 12:55
 # @Desc    : Slider verification utility package
 import os
-from typing import List
+from typing import Any, List
 from urllib.parse import urlparse
 
-import cv2
 import httpx
 import numpy as np
+
+from .optional_dependencies import require_opencv
+
+
+class _LazyOpenCV:
+    """Proxy that imports cv2 only when image recognition is actually used."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(require_opencv(), name)
+
+
+cv2 = _LazyOpenCV()
 
 
 class Slide:

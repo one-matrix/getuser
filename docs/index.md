@@ -20,6 +20,8 @@ cd MediaCrawler
 uv sync
 ```
 
+> OpenCV 为可选依赖。macOS 日常调试无需安装；自动滑块图片识别需要时使用 `uv sync --extra opencv`。
+
 ### 3. 安装 Playwright 浏览器驱动
 ```shell
 uv run playwright install
@@ -66,6 +68,12 @@ venv\Scripts\activate
 # 安装依赖与驱动
 pip install -r requirements.txt
 playwright install
+```
+
+如需自动滑块图片识别，额外执行：
+
+```shell
+pip install -r requirements-opencv.txt
 ```
 ```shell
 # 运行爬虫程序（venv 环境）

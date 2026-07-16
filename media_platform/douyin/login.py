@@ -777,9 +777,11 @@ class DouYinLogin(AbstractLogin):
         """
         import base64 as _b64
         import os as _os
-        import cv2 as _cv2
         import numpy as _np
         import httpx as _httpx
+        from tools.optional_dependencies import require_opencv
+
+        _cv2 = require_opencv()
 
         img_dir = _os.path.join(_os.getcwd(), 'temp_image')
         _os.makedirs(img_dir, exist_ok=True)

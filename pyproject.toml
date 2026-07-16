@@ -17,7 +17,6 @@ dependencies = [
     "jieba==0.42.1",
     "matplotlib==3.9.0",
     "motor>=3.3.0",
-    "opencv-python>=4.11.0.86",
     "pandas==2.2.3",
     "parsel==1.9.1",
     "pillow==9.5.0",
@@ -40,6 +39,11 @@ dependencies = [
     "websockets>=15.0.1",
     "asyncpg>=0.31.0",
     "xhshow>=0.1.9",
+]
+
+[project.optional-dependencies]
+opencv = [
+    "opencv-python>=4.11.0.86",
 ]
 
 [tool.pytest.ini_options]

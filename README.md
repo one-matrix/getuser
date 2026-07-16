@@ -112,6 +112,8 @@ cd MediaCrawler
 uv sync
 ```
 
+> macOS 调试默认不安装 OpenCV，核心爬虫和 CDP 浏览器功能可以正常使用。只有需要自动识别滑块图片时，才执行 `uv sync --extra opencv`。
+
 ### 🌐 浏览器驱动安装（可选）
 
 > 如果使用默认的 CDP 模式（连接已有 Chrome 浏览器），**无需安装浏览器驱动**。仅在使用标准 Playwright 模式时需要安装。
@@ -208,6 +210,12 @@ venv\Scripts\activate
 
 ```shell
 pip install -r requirements.txt
+```
+
+OpenCV 已改为可选依赖。只有需要自动识别滑块图片时再安装：
+
+```shell
+pip install -r requirements-opencv.txt
 ```
 
 #### 安装 playwright 浏览器驱动
