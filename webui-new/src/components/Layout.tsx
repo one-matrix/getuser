@@ -11,11 +11,8 @@ import {
   LogoutOutlined,
   MoonOutlined,
   SunOutlined,
-  SafetyCertificateOutlined,
-  TeamOutlined,
-  DollarOutlined,
-  BarChartOutlined,
   CrownOutlined,
+  GlobalOutlined,
 } from '@ant-design/icons';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useNotices, NoticeList } from './GlobalNotice';
@@ -34,6 +31,10 @@ interface LayoutProps {
   children: React.ReactNode;
   isDark?: boolean;
   onThemeChange?: (isDark: boolean) => void;
+}
+
+interface OnboardingWindow extends Window {
+  __restartOnboarding?: () => void;
 }
 
 const Layout: React.FC<LayoutProps> = ({ children, isDark, onThemeChange }) => {
@@ -64,7 +65,7 @@ const Layout: React.FC<LayoutProps> = ({ children, isDark, onThemeChange }) => {
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
 
-  // 简化导航(v6.6):8项精简为5项,提升信息密度
+  // 简化导航(v6.6):核心业务入口集中在侧边栏
   // - 工作台:数据驾驶舱(原首页)
   // - 获客中心:任务管理+数据分析(Tab切换)
   // - 客户线索:线索列表+看板
@@ -74,6 +75,7 @@ const Layout: React.FC<LayoutProps> = ({ children, isDark, onThemeChange }) => {
     { key: '/', icon: <DashboardOutlined />, label: '工作台' },
     { key: '/tasks', icon: <RobotOutlined />, label: '获客中心' },
     { key: '/leads', icon: <UserOutlined />, label: '客户线索' },
+    { key: '/x', icon: <GlobalOutlined />, label: 'X 运营' },
     { key: '/mine', icon: <CrownOutlined />, label: '我的' },
     { key: '/settings', icon: <SettingOutlined />, label: '设置' },
   ];
@@ -185,7 +187,7 @@ const Layout: React.FC<LayoutProps> = ({ children, isDark, onThemeChange }) => {
                     icon: <RobotOutlined />,
                     label: '查看新手引导',
                     onClick: () => {
-                      (window as any).__restartOnboarding?.();
+                      (window as OnboardingWindow).__restartOnboarding?.();
                     },
                   },
                   { type: 'divider' as const },

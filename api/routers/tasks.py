@@ -793,6 +793,9 @@ async def _task_to_dict(task: CrawlerTaskModel, session: AsyncSession = None) ->
             "min_lead_score": task.min_lead_score,
             "enable_lead_capture": bool(task.enable_lead_capture),
             "schedule_type": task.schedule_type,
+            "schedule_time": task.schedule_time or "09:00",
+            "schedule_weekday": task.schedule_weekday or 1,
+            "schedule_interval_seconds": getattr(task, "schedule_interval_seconds", 900) or 900,
             "status": task.status,
             "created_ts": task.created_ts,
             "total_crawled": content_count,
@@ -832,6 +835,9 @@ class TaskCreateRequest(BaseModel):
     min_lead_score: int = 50
     enable_lead_capture: bool = True
     schedule_type: str = "once"
+    schedule_time: str = "09:00"
+    schedule_weekday: int = 1
+    schedule_interval_seconds: int = 900
     status: str = "pending"
     created_ts: Optional[int] = None
     promo_config: Optional[PromoConfig] = None
@@ -853,6 +859,9 @@ class TaskResponse(BaseModel):
     min_lead_score: int
     enable_lead_capture: bool
     schedule_type: str
+    schedule_time: str = "09:00"
+    schedule_weekday: int = 1
+    schedule_interval_seconds: int = 900
     status: str
     created_ts: int
     total_crawled: int
@@ -935,8 +944,9 @@ async def create_task(request: TaskCreateRequest, current_user: dict = Depends(g
             min_lead_score=request.min_lead_score,
             enable_lead_capture=1 if request.enable_lead_capture else 0,
             schedule_type=request.schedule_type,
-            schedule_time=getattr(request, 'schedule_time', '09:00') or '09:00',
-            schedule_weekday=getattr(request, 'schedule_weekday', 1) or 1,
+            schedule_time=request.schedule_time or "09:00",
+            schedule_weekday=max(1, min(7, request.schedule_weekday or 1)),
+            schedule_interval_seconds=max(60, request.schedule_interval_seconds or 900),
             status=request.status,
             created_ts=request.created_ts or now,
             updated_ts=now,
@@ -947,11 +957,12 @@ async def create_task(request: TaskCreateRequest, current_user: dict = Depends(g
             owner_user_id=_owner_id(current_user),
         )
         # 计算 next_scheduled_ts
-        if request.schedule_type in ("daily", "weekly"):
+        if request.schedule_type in ("daily", "weekly", "interval"):
             from ..services.task_scheduler import schedule_task_now
             task.next_scheduled_ts = schedule_task_now(
                 task_id, request.schedule_type,
-                task.schedule_time, task.schedule_weekday
+                task.schedule_time, task.schedule_weekday,
+                task.schedule_interval_seconds,
             )
         session.add(task)
         await session.commit()
@@ -1169,6 +1180,7 @@ async def start_task(task_id: str, current_user: dict = Depends(get_current_user
             "wb": PlatformEnum.WEIBO,
             "tieba": PlatformEnum.TIEBA,
             "zhihu": PlatformEnum.ZHIHU,
+            "x": PlatformEnum.X,
         }
         
         keywords = json.loads(task.keywords) if task.keywords else []
@@ -1226,8 +1238,12 @@ async def start_task(task_id: str, current_user: dict = Depends(get_current_user
 
         config = CrawlerStartRequest(
             platform=platform_map.get(task.platform, PlatformEnum.DOUYIN),
-            login_type=LoginTypeEnum.COOKIE,
-            crawler_type=CrawlerTypeEnum.SEARCH,
+            login_type=LoginTypeEnum.OAUTH if task.platform == "x" else LoginTypeEnum.COOKIE,
+            crawler_type=(
+                CrawlerTypeEnum.TRENDING
+                if task.platform == "x" and task.crawl_type == "trending"
+                else CrawlerTypeEnum.SEARCH
+            ),
             keywords=keywords_str,
             save_option=SaveDataOptionEnum.POSTGRES,
             max_notes_count=runtime_max_notes,

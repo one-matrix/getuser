@@ -34,7 +34,7 @@ from playwright.async_api import (
 )
 
 import config
-from base.base_crawler import AbstractCrawler
+from base.base_crawler import AbstractBrowserCrawler
 from model.m_kuaishou import VideoUrlInfo, CreatorUrlInfo
 from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import kuaishou as kuaishou_store
@@ -48,7 +48,7 @@ from .help import parse_video_info_from_url, parse_creator_info_from_url
 from .login import KuaishouLogin
 
 
-class KuaishouCrawler(AbstractCrawler):
+class KuaishouCrawler(AbstractBrowserCrawler):
     context_page: Page
     ks_client: KuaiShouClient
     browser_context: BrowserContext

@@ -28,6 +28,7 @@ from .external_api import router as external_api_router
 from .config import router as config_router
 from .notifications import router as notifications_router
 from .plan import router as plan_router
+from .x_operations import router as x_operations_router
 from ..services.agent_client import router as agent_router
 
-__all__ = ["crawler_router", "data_router", "websocket_router", "customer_lead_router", "tasks_router", "cookies_router", "auth_router", "business_router", "agent_router", "external_api_router", "config_router", "notifications_router", "plan_router"]
+__all__ = ["crawler_router", "data_router", "websocket_router", "customer_lead_router", "tasks_router", "cookies_router", "auth_router", "business_router", "agent_router", "external_api_router", "config_router", "notifications_router", "plan_router", "x_operations_router"]

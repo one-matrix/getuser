@@ -84,6 +84,9 @@ export interface CrawlerTask {
   min_lead_score: number;
   enable_lead_capture: boolean;
   schedule_type: string;
+  schedule_time?: string;
+  schedule_weekday?: number;
+  schedule_interval_seconds?: number;
   status: 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
   created_ts: number;
   total_crawled: number;
@@ -121,6 +124,7 @@ export const PLATFORM_MAP: Record<string, string> = {
   wb: 'wb',
   zhihu: 'zhihu',
   tieba: 'tieba',
+  x: 'X',
   // 兼容旧key（仅用于显示已有数据，不在新建任务表单中暴露）
   douyin: 'dy',
   kuaishou: 'ks',

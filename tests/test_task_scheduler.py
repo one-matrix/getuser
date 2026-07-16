@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """定时任务调度测试
 
-覆盖 PRD §10.7.3:支持 once/daily/weekly 三种调度模式。
+覆盖 PRD §10.7.3:支持 once/interval/daily/weekly 调度模式。
 
 测试场景:
 1. _calc_next_scheduled_ts daily 模式时间计算
@@ -40,9 +40,10 @@ async def test_calc_next_scheduled_ts_daily_invalid_time():
     from api.services.task_scheduler import _calc_next_scheduled_ts
 
     now = datetime(2025, 1, 15, 8, 0, 0)
-    next_ts = _calc_next_scheduled_ts("daily", "invalid", 1, int(now.timestamp()))
     expected = now.replace(hour=9, minute=0, second=0, microsecond=0)
-    assert next_ts == int(expected.timestamp())
+    for invalid_time in ("invalid", "25:00", "09:60"):
+        next_ts = _calc_next_scheduled_ts("daily", invalid_time, 1, int(now.timestamp()))
+        assert next_ts == int(expected.timestamp())
 
 
 @pytest.mark.asyncio
@@ -96,6 +97,16 @@ async def test_calc_next_scheduled_ts_unknown_type():
 
 
 @pytest.mark.asyncio
+async def test_calc_next_scheduled_ts_interval():
+    """interval 模式按配置秒数计算，且最短为 60 秒。"""
+    from api.services.task_scheduler import _calc_next_scheduled_ts
+
+    now_ts = int(datetime(2025, 1, 15, 10, 0, 0).timestamp())
+    assert _calc_next_scheduled_ts("interval", "09:00", 1, now_ts, 900) == now_ts + 900
+    assert _calc_next_scheduled_ts("interval", "09:00", 1, now_ts, 5) == now_ts + 60
+
+
+@pytest.mark.asyncio
 async def test_schedule_task_now():
     """schedule_task_now 返回有效时间戳"""
     from api.services.task_scheduler import schedule_task_now
@@ -107,6 +118,10 @@ async def test_schedule_task_now():
     ts = schedule_task_now("task_1", "weekly", "14:00", 5)
     assert isinstance(ts, int)
     assert ts > 0
+
+    before = int(datetime.now().timestamp())
+    ts = schedule_task_now("task_1", "interval", interval_seconds=300)
+    assert before + 299 <= ts <= before + 301
 
 
 @pytest.mark.asyncio
@@ -130,3 +145,46 @@ async def test_scheduler_start_stop():
     await asyncio.sleep(0.1)
     assert not scheduler._scheduler_started
     assert scheduler._scheduler_task is None
+
+
+@pytest.mark.asyncio
+async def test_trigger_scheduled_task_reuses_owner_context():
+    """调度执行直接复用任务启动逻辑，不依赖固定端口或伪造认证 Header。"""
+    from api.services.task_scheduler import _trigger_scheduled_task
+
+    calls = []
+
+    async def fake_user_loader(user_id):
+        calls.append(("load_user", user_id))
+        return {"id": user_id, "username": "owner", "role": "operator", "status": "active"}
+
+    async def fake_task_starter(task_id, current_user):
+        calls.append(("start", task_id, current_user["id"]))
+        return {"success": True}
+
+    assert await _trigger_scheduled_task(
+        "task_x",
+        "42",
+        user_loader=fake_user_loader,
+        task_starter=fake_task_starter,
+    )
+    assert calls == [("load_user", 42), ("start", "task_x", 42)]
+
+
+@pytest.mark.asyncio
+async def test_trigger_scheduled_task_rejects_missing_owner():
+    from api.services.task_scheduler import _trigger_scheduled_task
+
+    called = False
+
+    async def fake_task_starter(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return {"success": True}
+
+    assert not await _trigger_scheduled_task(
+        "legacy_task",
+        "",
+        task_starter=fake_task_starter,
+    )
+    assert not called

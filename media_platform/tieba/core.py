@@ -32,7 +32,7 @@ from playwright.async_api import (
 )
 
 import config
-from base.base_crawler import AbstractCrawler
+from base.base_crawler import AbstractBrowserCrawler
 from model.m_baidu_tieba import TiebaCreator, TiebaNote
 from proxy.proxy_ip_pool import IpInfoModel, ProxyIpPool, create_ip_pool
 from store import tieba as tieba_store
@@ -46,7 +46,7 @@ from .help import TieBaExtractor
 from .login import BaiduTieBaLogin
 
 
-class TieBaCrawler(AbstractCrawler):
+class TieBaCrawler(AbstractBrowserCrawler):
     context_page: Page
     tieba_client: BaiduTieBaClient
     browser_context: BrowserContext

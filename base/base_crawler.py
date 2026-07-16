@@ -17,10 +17,15 @@
 # 详细许可条款请参阅项目根目录下的LICENSE文件。
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
-from abc import ABC, abstractmethod
-from typing import Dict, Optional
+from __future__ import annotations
 
-from playwright.async_api import BrowserContext, BrowserType, Playwright
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+if TYPE_CHECKING:
+    from playwright.async_api import BrowserContext, BrowserType, Playwright
+else:
+    BrowserContext = BrowserType = Playwright = Any
 
 
 class AbstractCrawler(ABC):
@@ -38,6 +43,14 @@ class AbstractCrawler(ABC):
         search
         """
         pass
+
+
+class AbstractBrowserCrawler(AbstractCrawler):
+    """Base class for platforms that require Playwright or CDP.
+
+    Official API based platforms, such as X, should inherit from
+    ``AbstractCrawler`` directly and must not initialize a browser.
+    """
 
     @abstractmethod
     async def launch_browser(self, chromium: BrowserType, playwright_proxy: Optional[Dict], user_agent: Optional[str], headless: bool = True) -> BrowserContext:

@@ -33,6 +33,7 @@ class PlatformEnum(str, Enum):
     WEIBO = "wb"
     TIEBA = "tieba"
     ZHIHU = "zhihu"
+    X = "x"
 
 
 class LoginTypeEnum(str, Enum):
@@ -40,6 +41,7 @@ class LoginTypeEnum(str, Enum):
     QRCODE = "qrcode"
     PHONE = "phone"
     COOKIE = "cookie"
+    OAUTH = "oauth"
 
 
 class CrawlerTypeEnum(str, Enum):
@@ -48,6 +50,7 @@ class CrawlerTypeEnum(str, Enum):
     DETAIL = "detail"
     CREATOR = "creator"
     SEND_DM = "send_dm"
+    TRENDING = "trending"
 
 
 class SaveDataOptionEnum(str, Enum):

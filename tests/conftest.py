@@ -164,7 +164,13 @@ async def app_client(test_engine):
         # 只清测试实际用到的表
         for tbl in ["customer_lead", "intent_rule", "keyword_category",
                     "crawler_task", "task_log", "outreach_record", "outreach_task",
-                    "notification", "user_need_analysis", "ad_content", "product_info"]:
+                    "notification", "user_need_analysis", "ad_content", "product_info",
+                    "x_publish_results", "x_publish_jobs", "x_policy_decisions",
+                    "x_review_tasks", "x_reply_candidates", "x_thread_analyses",
+                    "x_interactions", "x_conversations", "x_posts",
+                    "x_topic_snapshots", "x_topics", "x_regions", "x_accounts",
+                    "x_user_opt_outs", "x_jobs", "x_api_usage_daily",
+                    "x_rate_limit_state", "x_system_controls", "x_audit_logs"]:
             try:
                 await conn.execute(text(f"DELETE FROM {tbl}"))
             except Exception:

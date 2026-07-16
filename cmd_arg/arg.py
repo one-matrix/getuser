@@ -47,6 +47,7 @@ class PlatformEnum(str, Enum):
     WEIBO = "wb"
     TIEBA = "tieba"
     ZHIHU = "zhihu"
+    X = "x"
 
 
 class LoginTypeEnum(str, Enum):
@@ -55,6 +56,7 @@ class LoginTypeEnum(str, Enum):
     QRCODE = "qrcode"
     PHONE = "phone"
     COOKIE = "cookie"
+    OAUTH = "oauth"
 
 
 class CrawlerTypeEnum(str, Enum):
@@ -64,6 +66,7 @@ class CrawlerTypeEnum(str, Enum):
     DETAIL = "detail"
     CREATOR = "creator"
     SEND_DM = "send_dm"
+    TRENDING = "trending"
 
 
 class SaveDataOptionEnum(str, Enum):
@@ -163,7 +166,7 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
             PlatformEnum,
             typer.Option(
                 "--platform",
-                help="Media platform selection (xhs=XiaoHongShu | dy=Douyin | ks=Kuaishou | bili=Bilibili | wb=Weibo | tieba=Baidu Tieba | zhihu=Zhihu)",
+                help="Media platform selection (xhs=XiaoHongShu | dy=Douyin | ks=Kuaishou | bili=Bilibili | wb=Weibo | tieba=Baidu Tieba | zhihu=Zhihu | x=X official API)",
                 rich_help_panel="Basic Configuration",
             ),
         ] = _coerce_enum(PlatformEnum, config.PLATFORM, PlatformEnum.XHS),
@@ -171,7 +174,7 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
             LoginTypeEnum,
             typer.Option(
                 "--lt",
-                help="Login type (qrcode=QR Code | phone=Phone | cookie=Cookie)",
+                help="Login type (qrcode=QR Code | phone=Phone | cookie=Cookie | oauth=X OAuth)",
                 rich_help_panel="Account Configuration",
             ),
         ] = _coerce_enum(LoginTypeEnum, config.LOGIN_TYPE, LoginTypeEnum.QRCODE),
@@ -179,7 +182,7 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
             CrawlerTypeEnum,
             typer.Option(
                 "--type",
-                help="Crawler type (search=Search | detail=Detail | creator=Creator)",
+                help="Crawler type (search=Search | detail=Detail | creator=Creator | trending=X trends)",
                 rich_help_panel="Basic Configuration",
             ),
         ] = _coerce_enum(CrawlerTypeEnum, config.CRAWLER_TYPE, CrawlerTypeEnum.SEARCH),

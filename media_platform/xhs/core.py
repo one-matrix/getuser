@@ -33,7 +33,7 @@ from playwright.async_api import (
 from tenacity import RetryError
 
 import config
-from base.base_crawler import AbstractCrawler
+from base.base_crawler import AbstractBrowserCrawler
 from model.m_xiaohongshu import NoteUrlInfo, CreatorUrlInfo
 from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import xhs as xhs_store
@@ -48,7 +48,7 @@ from .help import parse_note_info_from_note_url, parse_creator_info_from_url, ge
 from .login import XiaoHongShuLogin
 
 
-class XiaoHongShuCrawler(AbstractCrawler):
+class XiaoHongShuCrawler(AbstractBrowserCrawler):
     context_page: Page
     xhs_client: XiaoHongShuClient
     browser_context: BrowserContext

@@ -7,13 +7,10 @@ import AuthGuard from './components/AuthGuard';
 import Dashboard from './pages/Dashboard';
 import LeadList from './pages/LeadList';
 import TaskManager from './pages/TaskManager';
-import CookieManager from './pages/CookieManager';
-import BusinessManager from './pages/BusinessManager';
-import Analytics from './pages/Analytics';
 import Settings from './pages/Settings';
 import Login from './pages/Login';
-import UserManagement from './pages/UserManagement';
 import Mine from './pages/Mine';
+import XOperations from './pages/XOperations';
 
 function AnimatedRoutes() {
   const location = useLocation();
@@ -23,6 +20,7 @@ function AnimatedRoutes() {
       <Route path="/" element={<Dashboard />} />
       <Route path="/leads" element={<LeadList />} />
       <Route path="/tasks" element={<TaskManager />} />
+      <Route path="/x" element={<XOperations />} />
       {/* 兼容旧路由:自动重定向到新位置 */}
       <Route path="/cookies" element={<Navigate to="/mine" replace />} />
       <Route path="/business" element={<Navigate to="/mine" replace />} />

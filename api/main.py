@@ -37,7 +37,7 @@ from .services.cookie_manager import _ensure_env_loaded
 _ensure_env_loaded()
 print("[main] Loaded .env via cookie_manager")
 
-from .routers import crawler_router, data_router, websocket_router, customer_lead_router, tasks_router, cookies_router, auth_router, business_router, agent_router, external_api_router, config_router, notifications_router, plan_router
+from .routers import crawler_router, data_router, websocket_router, customer_lead_router, tasks_router, cookies_router, auth_router, business_router, agent_router, external_api_router, config_router, notifications_router, plan_router, x_operations_router
 
 app = FastAPI(
     title="MediaCrawler WebUI API",
@@ -96,12 +96,29 @@ async def startup_event():
     except Exception as e:
         print(f"[startup] Auto-load account_pool failed (non-fatal): {e}")
 
-    # 启动任务调度器(daily/weekly 支持)
-    try:
-        from api.services.task_scheduler import start_scheduler
-        await start_scheduler()
-    except Exception as e:
-        print(f"[startup] Task scheduler start failed (non-fatal): {e}")
+    # 调度和后台 Worker 必须由明确的进程角色持有，避免多 Uvicorn
+    # worker 重复执行同一任务。
+    process_role = os.environ.get("PROCESS_ROLE", "all").strip().lower()
+    if process_role in ("all", "scheduler"):
+        try:
+            from api.services.task_scheduler import start_scheduler
+            await start_scheduler()
+        except Exception as e:
+            print(f"[startup] Task scheduler start failed (non-fatal): {e}")
+    else:
+        print(f"[startup] PROCESS_ROLE={process_role}, skipping task scheduler")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop process-owned background services cleanly."""
+    process_role = os.environ.get("PROCESS_ROLE", "all").strip().lower()
+    if process_role in ("all", "scheduler"):
+        try:
+            from api.services.task_scheduler import stop_scheduler
+            await stop_scheduler()
+        except Exception as e:
+            print(f"[shutdown] Task scheduler stop failed (non-fatal): {e}")
 
 # Get webui static files directory
 WEBUI_DIR = os.path.join(os.path.dirname(__file__), "webui")
@@ -140,6 +157,7 @@ app.include_router(external_api_router, prefix="/api")
 app.include_router(config_router, prefix="/api")
 app.include_router(notifications_router, prefix="/api")
 app.include_router(plan_router, prefix="/api")
+app.include_router(x_operations_router, prefix="/api")
 
 # 添加 /api/dashboard 别名（从数据库获取数据）
 @app.get("/api/dashboard")

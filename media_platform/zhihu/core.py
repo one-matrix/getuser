@@ -35,7 +35,7 @@ from playwright.async_api import (
 
 import config
 from constant import zhihu as constant
-from base.base_crawler import AbstractCrawler
+from base.base_crawler import AbstractBrowserCrawler
 from model.m_zhihu import ZhihuContent, ZhihuCreator
 from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import zhihu as zhihu_store
@@ -49,7 +49,7 @@ from .help import ZhihuExtractor, judge_zhihu_url
 from .login import ZhiHuLogin
 
 
-class ZhihuCrawler(AbstractCrawler):
+class ZhihuCrawler(AbstractBrowserCrawler):
     context_page: Page
     zhihu_client: ZhiHuClient
     browser_context: BrowserContext

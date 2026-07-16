@@ -409,6 +409,7 @@ const TaskManager: React.FC = () => {
   const [modalVisible, setModalVisible] = useState(false);
   const [createStep, setCreateStep] = useState(0);
   const [form] = Form.useForm();
+  const selectedCreatePlatform = Form.useWatch('platform', form);
   const [previewData, setPreviewData] = useState<any>(null);
 
   // 任务详情弹窗状态
@@ -1247,6 +1248,8 @@ const TaskManager: React.FC = () => {
           ? values.keywords.split(/[,，]/).map((k: string) => k.trim()).filter(Boolean)
           : values.keywords,
         crawl_type: values.crawl_type || 'search',
+        schedule_type: values.schedule_type || 'once',
+        schedule_interval_seconds: values.schedule_interval_seconds || 900,
         max_notes: values.max_notes || 50000,
         promo_config: values.promo_config || {},
       });
@@ -1266,6 +1269,7 @@ const TaskManager: React.FC = () => {
     weibo: '📱',
     zhihu: '📱',
     tieba: '📱',
+    x: '𝕏',
   };
 
   return (
@@ -1412,8 +1416,25 @@ const TaskManager: React.FC = () => {
           {createStep === 0 && (
             <div>
               <Form.Item name="platform" label="你想从哪里获客？" rules={[{ required: true, message: '请选择平台' }]}>
-                <Select placeholder="选择平台" size="large">
-                  {Object.entries(PLATFORM_MAP).filter(([key]) => ['dy', 'xhs', 'ks', 'bili', 'wb', 'zhihu', 'tieba'].includes(key)).map(([key, label]) => (
+                <Select
+                  placeholder="选择平台"
+                  size="large"
+                  onChange={(platform) => {
+                    form.setFieldsValue(
+                      platform === 'x'
+                        ? {
+                            crawl_type: 'trending',
+                            schedule_type: 'interval',
+                            schedule_interval_seconds: 900,
+                          }
+                        : {
+                            crawl_type: 'search',
+                            schedule_type: 'once',
+                          },
+                    );
+                  }}
+                >
+                  {Object.entries(PLATFORM_MAP).filter(([key]) => ['dy', 'xhs', 'ks', 'bili', 'wb', 'zhihu', 'tieba', 'x'].includes(key)).map(([key, label]) => (
                     <Option key={key} value={key}>
                       <span style={{ fontSize: 18, marginRight: 8 }}>{platformIcons[key] || '📱'}</span>
                       {label}
@@ -1434,9 +1455,27 @@ const TaskManager: React.FC = () => {
 
           {createStep === 1 && (
             <div>
-              <Form.Item name="keywords" label="你想找什么样的客户？" rules={[{ required: true, message: '请输入关键词' }]}>
+              {selectedCreatePlatform === 'x' && (
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message="X 任务只使用官方 API"
+                  description="热点模式按地域定时抓取；关键词模式采集近期帖子。发布仍在“X 运营”中逐条审核，任务不会自动评论。"
+                />
+              )}
+
+              <Form.Item
+                name="keywords"
+                label={selectedCreatePlatform === 'x' ? '监控关键词' : '你想找什么样的客户？'}
+                rules={[{ required: true, message: '请输入关键词' }]}
+              >
                 <Input.TextArea
-                  placeholder="输入关键词，用逗号分隔。例如：AI工具, 聚合平台, ChatGPT"
+                  placeholder={
+                    selectedCreatePlatform === 'x'
+                      ? '输入品牌或主题关键词，用逗号分隔。例如：MediaCrawler, AI Agent'
+                      : '输入关键词，用逗号分隔。例如：AI工具, 聚合平台, ChatGPT'
+                  }
                   rows={3}
                   size="large"
                 />
@@ -1445,24 +1484,70 @@ const TaskManager: React.FC = () => {
               <Form.Item name="crawl_type" label="获客方式" initialValue="search">
                 <Radio.Group>
                   <Radio.Button value="search">🔍 关键词搜索</Radio.Button>
-                  <Radio.Button value="creator">👤 创作者主页</Radio.Button>
+                  {selectedCreatePlatform !== 'x' && (
+                    <Radio.Button value="creator">👤 创作者主页</Radio.Button>
+                  )}
                   <Radio.Button value="trending">🔥 热门内容</Radio.Button>
                 </Radio.Group>
               </Form.Item>
 
-              <Form.Item name="max_notes" hidden initialValue={50000}><Input type="number" /></Form.Item>
-              <div style={{ padding: 12, background: '#f6ffed', borderRadius: 8, marginBottom: 16 }}>
-                <div style={{ fontSize: 13, color: '#52c41a' }}>♾️ 获客数量不限，系统会尽可能多地采集数据</div>
-              </div>
+              {selectedCreatePlatform === 'x' && (
+                <>
+                  <Form.Item name="schedule_type" label="监听方式" initialValue="interval">
+                    <Radio.Group>
+                      <Radio.Button value="once">单次执行</Radio.Button>
+                      <Radio.Button value="interval">定时监听</Radio.Button>
+                    </Radio.Group>
+                  </Form.Item>
+                  <Form.Item noStyle shouldUpdate={(previous, current) => previous.schedule_type !== current.schedule_type}>
+                    {({ getFieldValue }) => (
+                      getFieldValue('schedule_type') === 'interval' ? (
+                        <Form.Item
+                          name="schedule_interval_seconds"
+                          label="监听间隔（秒）"
+                          initialValue={900}
+                          rules={[
+                            { required: true, message: '请输入监听间隔' },
+                            {
+                              validator: (_, value) => (
+                                Number(value) >= 60
+                                  ? Promise.resolve()
+                                  : Promise.reject(new Error('监听间隔不能少于 60 秒'))
+                              ),
+                            },
+                          ]}
+                        >
+                          <Input type="number" min={60} step={60} />
+                        </Form.Item>
+                      ) : null
+                    )}
+                  </Form.Item>
+                </>
+              )}
 
-              <Form.Item name="publish_time_type" label="内容时间范围" initialValue={14}>
-                <Radio.Group>
-                  <Radio.Button value={0}>不限</Radio.Button>
-                  <Radio.Button value={7}>最近一周</Radio.Button>
-                  <Radio.Button value={14}>最近两周</Radio.Button>
-                  <Radio.Button value={180}>最近半年</Radio.Button>
-                </Radio.Group>
-              </Form.Item>
+              <Form.Item name="max_notes" hidden initialValue={50000}><Input type="number" /></Form.Item>
+              {selectedCreatePlatform === 'x' ? (
+                <div style={{ padding: 12, background: '#e6f4ff', borderRadius: 8, marginBottom: 16 }}>
+                  <div style={{ fontSize: 13, color: '#1677ff' }}>
+                    每轮采集量由 X 读取预算和 X_MAX_TOPICS_PER_CYCLE / X_MAX_POSTS_PER_TOPIC 安全上限控制。
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div style={{ padding: 12, background: '#f6ffed', borderRadius: 8, marginBottom: 16 }}>
+                    <div style={{ fontSize: 13, color: '#52c41a' }}>♾️ 获客数量不限，系统会尽可能多地采集数据</div>
+                  </div>
+
+                  <Form.Item name="publish_time_type" label="内容时间范围" initialValue={14}>
+                    <Radio.Group>
+                      <Radio.Button value={0}>不限</Radio.Button>
+                      <Radio.Button value={7}>最近一周</Radio.Button>
+                      <Radio.Button value={14}>最近两周</Radio.Button>
+                      <Radio.Button value={180}>最近半年</Radio.Button>
+                    </Radio.Group>
+                  </Form.Item>
+                </>
+              )}
 
               {/* 推广配置折叠(简化向导,默认填充,可选展开) */}
               <Form.Item name={['promo_config', 'product_name']} hidden initialValue="AI聚合平台"><Input /></Form.Item>
@@ -1482,6 +1567,8 @@ const TaskManager: React.FC = () => {
               <Form.Item name="name" hidden><Input /></Form.Item>
               <Form.Item name="keywords" hidden><Input /></Form.Item>
               <Form.Item name="crawl_type" hidden><Input /></Form.Item>
+              <Form.Item name="schedule_type" hidden><Input /></Form.Item>
+              <Form.Item name="schedule_interval_seconds" hidden><Input type="number" /></Form.Item>
               <Form.Item name="max_notes" hidden><Input type="number" /></Form.Item>
 
               <div style={{ padding: 16, background: '#f6ffed', borderRadius: 8, marginBottom: 16 }}>
@@ -1490,12 +1577,23 @@ const TaskManager: React.FC = () => {
                   <div><strong>平台：</strong>{PLATFORM_MAP[previewData.platform] || previewData.platform}</div>
                   <div><strong>关键词：</strong>{previewData.keywords?.join(', ')}</div>
                   <div><strong>获客方式：</strong>{previewData.crawl_type === 'search' ? '关键词搜索' : previewData.crawl_type === 'creator' ? '创作者主页' : '热门内容'}</div>
-                  <div><strong>获客数量：</strong>♾️ 不限（尽可能多爬）</div>
+                  {previewData.platform === 'x' && (
+                    <div>
+                      <strong>监听计划：</strong>
+                      {previewData.schedule_type === 'interval'
+                        ? `每 ${previewData.schedule_interval_seconds} 秒`
+                        : '单次执行'}
+                    </div>
+                  )}
+                  <div>
+                    <strong>采集范围：</strong>
+                    {previewData.platform === 'x' ? '按 X API 预算与每轮安全上限' : '♾️ 不限（尽可能多爬）'}
+                  </div>
                   <div><strong>预计耗时：</strong>取决于关键词热度</div>
                 </div>
               </div>
 
-              {previewData.promo_config && (
+              {previewData.platform !== 'x' && previewData.promo_config && (
                 <div style={{ padding: 16, background: '#fff7e6', borderRadius: 8, marginBottom: 16 }}>
                   <h4 style={{ margin: '0 0 12px' }}>🎯 推广信息</h4>
                   <div style={{ fontSize: 14, lineHeight: 2 }}>

@@ -37,7 +37,7 @@ from playwright.async_api import (
 )
 
 import config
-from base.base_crawler import AbstractCrawler
+from base.base_crawler import AbstractBrowserCrawler
 from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import weibo as weibo_store
 from tools import utils
@@ -51,7 +51,7 @@ from .help import filter_search_result_card
 from .login import WeiboLogin
 
 
-class WeiboCrawler(AbstractCrawler):
+class WeiboCrawler(AbstractBrowserCrawler):
     context_page: Page
     wb_client: WeiboClient
     browser_context: BrowserContext

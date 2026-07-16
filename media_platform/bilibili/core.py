@@ -40,7 +40,7 @@ from playwright.async_api import (
 from playwright._impl._errors import TargetClosedError
 
 import config
-from base.base_crawler import AbstractCrawler
+from base.base_crawler import AbstractBrowserCrawler
 from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import bilibili as bilibili_store
 from tools import utils
@@ -54,7 +54,7 @@ from .help import parse_video_info_from_url, parse_creator_info_from_url
 from .login import BilibiliLogin
 
 
-class BilibiliCrawler(AbstractCrawler):
+class BilibiliCrawler(AbstractBrowserCrawler):
     context_page: Page
     bili_client: BilibiliClient
     browser_context: BrowserContext

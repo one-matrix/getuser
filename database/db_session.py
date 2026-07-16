@@ -109,6 +109,12 @@ async def _migrate_owner_user_id(engine, db_type: str):
                     text(f"ALTER TABLE {t} ADD COLUMN IF NOT EXISTS owner_user_id VARCHAR(64) DEFAULT '' ")
                 )
                 await conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{t}_owner_user_id ON {t} (owner_user_id)"))
+            await conn.execute(
+                text(
+                    "ALTER TABLE crawler_task "
+                    "ADD COLUMN IF NOT EXISTS schedule_interval_seconds INTEGER DEFAULT 900"
+                )
+            )
     elif db_type == "sqlite":
         async with engine.begin() as conn:
             for t in tables:
@@ -116,6 +122,15 @@ async def _migrate_owner_user_id(engine, db_type: str):
                     await conn.execute(text(f"ALTER TABLE {t} ADD COLUMN owner_user_id VARCHAR(64) DEFAULT ''"))
                 except Exception:
                     pass  # 字段已存在
+            try:
+                await conn.execute(
+                    text(
+                        "ALTER TABLE crawler_task "
+                        "ADD COLUMN schedule_interval_seconds INTEGER DEFAULT 900"
+                    )
+                )
+            except Exception:
+                pass
     elif db_type in ("mysql", "db"):
         async with engine.begin() as conn:
             for t in tables:
@@ -125,6 +140,15 @@ async def _migrate_owner_user_id(engine, db_type: str):
                     await conn.execute(text(f"CREATE INDEX ix_{t}_owner_user_id ON {t} (owner_user_id)"))
                 except Exception:
                     pass
+            try:
+                await conn.execute(
+                    text(
+                        "ALTER TABLE crawler_task "
+                        "ADD COLUMN schedule_interval_seconds INTEGER DEFAULT 900"
+                    )
+                )
+            except Exception:
+                pass
 
 
 @asynccontextmanager

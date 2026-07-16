@@ -18,7 +18,7 @@
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 # Basic configuration
-PLATFORM = "dy"  # Platform, xhs | dy | ks | bili | wb | tieba | zhihu
+PLATFORM = "dy"  # Platform, xhs | dy | ks | bili | wb | tieba | zhihu | x
 
 # 是否使用海外版小红书 (rednote.com)
 # 开启后 API 走 webapi.rednote.com，cookie 域使用 .rednote.com
@@ -28,7 +28,7 @@ KEYWORDS = "编程副业,编程兼职"  # Keyword search configuration, separate
 LOGIN_TYPE = "cookie"  # qrcode or phone or cookie
 COOKIES = "a1=19e8db46e3eyc8ay0gy2nebyaxx3vowaboqbhljf150000191587; web_session=040069b34ac4abd4313cc53c14384ba523e983; webId=e58c0739664bcaa8451a1f04f7f976d0; xsecappid=xhs-pc-web; gid=yjdYfD4jYjDfyjdYfD4Kdl1VqdvSY0v8kvJIAiydDv0CCD28qhlE0x888yjy2YW8K0dK824d; sec_poison_id=1b470068-a2ab-46da-a814-050037a1e659; websectiga=10f9a40ba454a07755a08f27ef8194c53637eba4551cf9751c009d9afb564467"
 CRAWLER_TYPE = (
-    "send_dm"  # Crawling type, search | detail | creator | send_dm
+    "send_dm"  # Crawling type, search | detail | creator | send_dm | trending
 )
 # Whether to enable IP proxy
 ENABLE_IP_PROXY = False
@@ -148,3 +148,4 @@ from .ks_config import *
 from .weibo_config import *
 from .tieba_config import *
 from .zhihu_config import *
+from .x_config import *
