@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Dict
 
-from media_platform.x.client import XApiClient
+from media_platform.x.client import XWriteApiClient
 
 from .policy_service import PolicyEvaluation
 
@@ -25,7 +25,7 @@ def build_idempotency_key(
 
 
 class XPublisher:
-    def __init__(self, client: XApiClient) -> None:
+    def __init__(self, client: XWriteApiClient) -> None:
         self.client = client
 
     async def publish_reply(

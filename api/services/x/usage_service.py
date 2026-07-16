@@ -1,4 +1,4 @@
-"""Read/write budget and rate-limit primitives."""
+"""Browser crawl-volume and official write budget primitives."""
 
 from __future__ import annotations
 
@@ -45,8 +45,8 @@ def evaluate_budget(used: int, limit: int, requested: int = 1, *, alert_ratio: f
 
 def configured_budgets() -> Dict[str, int]:
     return {
-        "post_reads": int(x_config.X_DAILY_POST_READ_BUDGET),
-        "user_reads": int(x_config.X_DAILY_USER_READ_BUDGET),
+        "post_reads": int(x_config.X_DAILY_CRAWLED_POST_LIMIT),
+        "user_reads": int(x_config.X_DAILY_CRAWLED_PROFILE_LIMIT),
         "writes": int(x_config.X_DAILY_WRITE_BUDGET),
     }
 

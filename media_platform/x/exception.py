@@ -1,4 +1,4 @@
-"""Exceptions raised by the official X API client."""
+"""Exceptions raised by the X browser reader and official write client."""
 
 from __future__ import annotations
 
@@ -59,3 +59,38 @@ class XRateLimitError(XApiError):
 class XServerError(XApiError):
     """A retryable X or upstream service failure."""
 
+
+class XBrowserError(RuntimeError):
+    """Base error for deterministic browser collection failures."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str = "browser_error",
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.retryable = retryable
+
+
+class XBrowserLoginRequired(XBrowserError):
+    """The configured browser profile is not logged in to X."""
+
+    def __init__(self, message: str = "X browser session requires login") -> None:
+        super().__init__(message, error_code="login_required", retryable=False)
+
+
+class XBrowserChallengeRequired(XBrowserError):
+    """X displayed a CAPTCHA, checkpoint, or account access challenge."""
+
+    def __init__(self, message: str = "X requires a manual browser challenge") -> None:
+        super().__init__(message, error_code="challenge_required", retryable=False)
+
+
+class XBrowserStructureChanged(XBrowserError):
+    """The page loaded, but expected public content could not be extracted."""
+
+    def __init__(self, message: str = "X page structure could not be parsed") -> None:
+        super().__init__(message, error_code="structure_changed", retryable=True)

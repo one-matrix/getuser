@@ -1,4 +1,5 @@
 import importlib.util
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -84,15 +85,7 @@ async def test_x_status_starts_write_disabled_and_kill_switch_on(x_app_client):
     assert payload["effective_write_allowed"] is False
 
 
-def test_rate_limit_endpoint_normalization_matches_usage_keys(x_router_module):
-    assert (
-        x_router_module._normalize_endpoint("GET", "/trends/by/woeid/1")
-        == "GET /2/trends/by/woeid/{woeid}"
-    )
-    assert (
-        x_router_module._normalize_endpoint("GET", "/tweets/search/recent")
-        == "GET /2/tweets/search/recent"
-    )
+def test_write_rate_limit_endpoint_normalization_matches_usage_keys(x_router_module):
     assert (
         x_router_module._normalize_endpoint("POST", "/tweets")
         == "POST /2/tweets"
@@ -255,8 +248,8 @@ async def test_mentions_refresh_only_collects_and_never_publishes(
     async def fake_access_token(*args, **kwargs):
         return "user-token"
 
-    async def fake_mentions(self, user_id, **kwargs):
-        assert user_id == "123"
+    async def fake_mentions(username, **kwargs):
+        assert username == "brandbot"
         return {
             "data": [
                 {
@@ -276,8 +269,15 @@ async def test_mentions_refresh_only_collects_and_never_publishes(
             "meta": {"result_count": 1},
         }
 
+    class FakeBrowser:
+        get_mentions = staticmethod(fake_mentions)
+
+    @asynccontextmanager
+    async def fake_browser_reader():
+        yield FakeBrowser()
+
     monkeypatch.setattr(x_router_module, "_account_access_token", fake_access_token)
-    monkeypatch.setattr(x_router_module.XApiClient, "get_mentions", fake_mentions)
+    monkeypatch.setattr(x_router_module, "_browser_reader", fake_browser_reader)
 
     response = await x_app_client.post(
         "/api/x/interactions/refresh",
@@ -388,7 +388,7 @@ async def test_failed_publish_reuses_job_and_keeps_monotonic_attempt_history(
     async def fake_access_token(*args, **kwargs):
         return "user-token"
 
-    async def fake_lookup(self, post_id):
+    async def fake_lookup(post_id):
         return {
             "data": {
                 "id": post_id,
@@ -418,9 +418,16 @@ async def test_failed_publish_reuses_job_and_keeps_monotonic_attempt_history(
             )
         return {"data": {"id": "8001", "text": kwargs["text"]}}
 
+    class FakeBrowser:
+        lookup_post = staticmethod(fake_lookup)
+
+    @asynccontextmanager
+    async def fake_browser_reader():
+        yield FakeBrowser()
+
     monkeypatch.setattr(x_router_module, "_account_access_token", fake_access_token)
-    monkeypatch.setattr(x_router_module.XApiClient, "lookup_post", fake_lookup)
-    monkeypatch.setattr(x_router_module.XApiClient, "create_reply", flaky_create_reply)
+    monkeypatch.setattr(x_router_module, "_browser_reader", fake_browser_reader)
+    monkeypatch.setattr(x_router_module.XWriteApiClient, "create_reply", flaky_create_reply)
     request_body = {
         "candidate_id": candidate_id,
         "content_hash": digest,

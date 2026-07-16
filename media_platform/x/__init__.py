@@ -1,4 +1,4 @@
-"""X platform integration based exclusively on the official X API.
+"""X platform integration with browser reads and controlled official writes.
 
 Exports are lazy so importing ``media_platform.x.client`` from an API service
 does not eagerly import the crawler facade back through that same service.
@@ -9,19 +9,24 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .client import XApiClient
-    from .core import XOfficialApiCrawler
+    from .browser_client import XBrowserClient
+    from .client import XWriteApiClient
+    from .core import XBrowserCrawler
 
-__all__ = ["XApiClient", "XOfficialApiCrawler"]
+__all__ = ["XBrowserClient", "XWriteApiClient", "XBrowserCrawler"]
 
 
 def __getattr__(name: str) -> Any:
-    if name == "XApiClient":
-        from .client import XApiClient
+    if name == "XBrowserClient":
+        from .browser_client import XBrowserClient
 
-        return XApiClient
-    if name == "XOfficialApiCrawler":
-        from .core import XOfficialApiCrawler
+        return XBrowserClient
+    if name == "XWriteApiClient":
+        from .client import XWriteApiClient
 
-        return XOfficialApiCrawler
+        return XWriteApiClient
+    if name == "XBrowserCrawler":
+        from .core import XBrowserCrawler
+
+        return XBrowserCrawler
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

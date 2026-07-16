@@ -1,15 +1,15 @@
-"""Async client for the official X API.
+"""Official X API client restricted to controlled write operations.
 
-This module intentionally has no Playwright, cookie, CDP, proxy-pool, or browser
-dependencies. Read endpoints use an app Bearer Token; write endpoints require a
-separate user-context access token.
+All X reads are performed by :mod:`media_platform.x.browser_client`. Keeping
+the write client separate makes accidental paid GET requests easy to detect in
+review and tests.
 """
 
 from __future__ import annotations
 
 import inspect
 import os
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 
 import httpx
 
@@ -22,59 +22,38 @@ from .exception import (
     XRateLimitError,
     XServerError,
 )
-from .field import build_topic_query
 
-
-DEFAULT_TWEET_FIELDS = ",".join(
-    [
-        "id",
-        "text",
-        "author_id",
-        "created_at",
-        "lang",
-        "conversation_id",
-        "public_metrics",
-        "referenced_tweets",
-        "possibly_sensitive",
-        "reply_settings",
-        "entities",
-        "edit_history_tweet_ids",
-    ]
-)
-DEFAULT_EXPANSIONS = "author_id,referenced_tweets.id,referenced_tweets.id.author_id"
-DEFAULT_USER_FIELDS = "id,name,username,description,verified,public_metrics,protected"
 
 ResponseObserver = Callable[[Dict[str, Any]], Optional[Awaitable[None]]]
 
 
-class XApiClient:
-    """Small, injectable X API v2 client with typed error mapping."""
+class XWriteApiClient:
+    """Small user-context client that only permits official X write calls."""
 
     def __init__(
         self,
         *,
-        bearer_token: Optional[str] = None,
         user_access_token: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: float = 30.0,
         http_client: Optional[httpx.AsyncClient] = None,
         response_observer: Optional[ResponseObserver] = None,
     ) -> None:
-        self.bearer_token = (bearer_token or os.getenv("X_BEARER_TOKEN", "")).strip()
         self.user_access_token = (
             user_access_token
             or os.getenv("X_ACCESS_TOKEN", "")
             or os.getenv("X_USER_ACCESS_TOKEN", "")
         ).strip()
-        configured_base = base_url or os.getenv("X_API_BASE_URL", "https://api.x.com")
-        configured_base = configured_base.rstrip("/")
+        configured_base = (
+            base_url or os.getenv("X_WRITE_API_BASE_URL") or os.getenv("X_API_BASE_URL", "https://api.x.com")
+        ).rstrip("/")
         self.base_url = configured_base if configured_base.endswith("/2") else f"{configured_base}/2"
         self.timeout = timeout
         self._client = http_client or httpx.AsyncClient(timeout=timeout)
         self._owns_client = http_client is None
         self.response_observer = response_observer
 
-    async def __aenter__(self) -> "XApiClient":
+    async def __aenter__(self) -> "XWriteApiClient":
         return self
 
     async def __aexit__(self, *_: Any) -> None:
@@ -83,17 +62,6 @@ class XApiClient:
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
-
-    def _token(self, auth: str) -> str:
-        if auth == "user":
-            token = self.user_access_token
-            label = "X user access token"
-        else:
-            token = self.bearer_token
-            label = "X_BEARER_TOKEN"
-        if not token:
-            raise XConfigurationError(f"{label} is not configured", error_code="credentials_missing")
-        return token
 
     async def _observe(self, response: httpx.Response, endpoint: str, method: str) -> None:
         if not self.response_observer:
@@ -115,51 +83,55 @@ class XApiClient:
         method: str,
         path: str,
         *,
-        auth: str = "app",
-        params: Optional[Mapping[str, Any]] = None,
         json: Any = None,
         headers: Optional[Mapping[str, str]] = None,
     ) -> Dict[str, Any]:
-        token = self._token(auth)
+        if method.upper() != "POST":
+            raise XConfigurationError(
+                "XWriteApiClient rejects read operations; use XBrowserClient",
+                error_code="read_operation_disabled",
+            )
+        if not self.user_access_token:
+            raise XConfigurationError(
+                "X user access token is not configured",
+                error_code="credentials_missing",
+            )
         request_headers = {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {self.user_access_token}",
             "Accept": "application/json",
-            "User-Agent": "MediaCrawler-X-Official-API/1.0",
+            "Content-Type": "application/json",
+            "User-Agent": "MediaCrawler-X-Controlled-Write/1.0",
         }
-        if json is not None:
-            request_headers["Content-Type"] = "application/json"
         if headers:
             request_headers.update(headers)
 
         url = path if path.startswith("http") else f"{self.base_url}/{path.lstrip('/')}"
         try:
             response = await self._client.request(
-                method,
+                "POST",
                 url,
-                params=dict(params or {}),
                 json=json,
                 headers=request_headers,
                 timeout=self.timeout,
             )
         except httpx.TimeoutException as exc:
             raise XServerError(
-                "X API request timed out",
+                "X write request timed out",
                 error_code="timeout",
                 retryable=True,
             ) from exc
         except httpx.RequestError as exc:
             raise XServerError(
-                f"X API network error: {exc}",
+                f"X write network error: {exc}",
                 error_code="network_error",
                 retryable=True,
             ) from exc
 
-        await self._observe(response, path, method)
+        await self._observe(response, path, "POST")
         try:
             payload: Any = response.json()
         except ValueError:
             payload = {"detail": response.text[:500]}
-
         if 200 <= response.status_code < 300:
             return payload if isinstance(payload, dict) else {"data": payload}
 
@@ -186,152 +158,6 @@ class XApiClient:
             raise XServerError(message, retryable=True, **kwargs)
         raise XApiError(message, **kwargs)
 
-    async def get_trends(self, woeid: int, *, max_trends: int = 20) -> Dict[str, Any]:
-        return await self.request(
-            "GET",
-            f"/trends/by/woeid/{int(woeid)}",
-            params={
-                "max_trends": min(max(int(max_trends), 1), 50),
-                "trend.fields": "trend_name,tweet_count",
-            },
-        )
-
-    async def recent_search(
-        self,
-        query: str,
-        *,
-        max_total: int = 50,
-        since_id: str = "",
-        sort_order: str = "relevancy",
-    ) -> Dict[str, Any]:
-        if not query or len(query) > 512:
-            raise ValueError("recent-search query must contain 1-512 characters")
-        max_total = min(max(int(max_total), 1), 500)
-        remaining = max_total
-        next_token = ""
-        combined_data: List[Dict[str, Any]] = []
-        combined_users: Dict[str, Dict[str, Any]] = {}
-        last_meta: Dict[str, Any] = {}
-
-        while remaining > 0:
-            per_page = min(max(remaining, 10), 100)
-            params: Dict[str, Any] = {
-                "query": query,
-                "max_results": per_page,
-                "sort_order": sort_order if sort_order in {"recency", "relevancy"} else "relevancy",
-                "tweet.fields": DEFAULT_TWEET_FIELDS,
-                "expansions": DEFAULT_EXPANSIONS,
-                "user.fields": DEFAULT_USER_FIELDS,
-            }
-            if since_id:
-                params["since_id"] = since_id
-            if next_token:
-                params["next_token"] = next_token
-            payload = await self.request("GET", "/tweets/search/recent", params=params)
-            page_data = list(payload.get("data") or [])
-            combined_data.extend(page_data[:remaining])
-            for user in (payload.get("includes") or {}).get("users") or []:
-                if user.get("id"):
-                    combined_users[str(user["id"])] = user
-            last_meta = dict(payload.get("meta") or {})
-            remaining = max_total - len(combined_data)
-            next_token = str(last_meta.get("next_token") or "")
-            if not next_token or not page_data:
-                break
-
-        return {
-            "data": combined_data[:max_total],
-            "includes": {"users": list(combined_users.values())},
-            "meta": {
-                **last_meta,
-                "result_count": len(combined_data[:max_total]),
-                "truncated_by_client": bool(next_token and len(combined_data) >= max_total),
-            },
-        }
-
-    async def search_topic(
-        self,
-        topic: str,
-        *,
-        lang: Optional[str] = None,
-        max_total: int = 50,
-    ) -> Dict[str, Any]:
-        query = build_topic_query(topic, lang=lang)
-        payload = await self.recent_search(query, max_total=max_total)
-        payload["query"] = query
-        return payload
-
-    async def recent_counts(
-        self,
-        query: str,
-        *,
-        granularity: str = "hour",
-    ) -> Dict[str, Any]:
-        if not query or len(query) > 512:
-            raise ValueError("counts query must contain 1-512 characters")
-        if granularity not in {"minute", "hour", "day"}:
-            raise ValueError("granularity must be minute, hour, or day")
-        return await self.request(
-            "GET",
-            "/tweets/counts/recent",
-            params={"query": query, "granularity": granularity},
-        )
-
-    async def lookup_post(self, post_id: str) -> Dict[str, Any]:
-        if not str(post_id).isdigit():
-            raise ValueError("post_id must be a numeric X Post ID")
-        return await self.request(
-            "GET",
-            f"/tweets/{post_id}",
-            params={
-                "tweet.fields": DEFAULT_TWEET_FIELDS,
-                "expansions": DEFAULT_EXPANSIONS,
-                "user.fields": DEFAULT_USER_FIELDS,
-            },
-        )
-
-    async def get_mentions(
-        self,
-        user_id: str,
-        *,
-        since_id: str = "",
-        max_total: int = 50,
-        user_context: bool = True,
-    ) -> Dict[str, Any]:
-        if not str(user_id).isdigit():
-            raise ValueError("user_id must be a numeric X User ID")
-        params: Dict[str, Any] = {
-            "max_results": min(max(max_total, 5), 100),
-            "tweet.fields": DEFAULT_TWEET_FIELDS,
-            "expansions": DEFAULT_EXPANSIONS,
-            "user.fields": DEFAULT_USER_FIELDS,
-        }
-        if since_id:
-            params["since_id"] = since_id
-        return await self.request(
-            "GET",
-            f"/users/{user_id}/mentions",
-            auth="user" if user_context else "app",
-            params=params,
-        )
-
-    async def get_me(self) -> Dict[str, Any]:
-        return await self.request(
-            "GET",
-            "/users/me",
-            auth="user",
-            params={
-                "user.fields": "id,name,username,description,verified,public_metrics,protected",
-            },
-        )
-
-    async def collect_thread(self, root_post_id: str, *, max_total: int = 50) -> Dict[str, Any]:
-        return await self.recent_search(
-            f"conversation_id:{root_post_id} -is:retweet",
-            max_total=max_total,
-            sort_order="relevancy",
-        )
-
     async def create_reply(
         self,
         *,
@@ -349,7 +175,6 @@ class XApiClient:
         return await self.request(
             "POST",
             "/tweets",
-            auth="user",
             json={
                 "text": text,
                 "reply": {"in_reply_to_tweet_id": str(target_post_id)},

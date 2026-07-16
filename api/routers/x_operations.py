@@ -1,15 +1,17 @@
 """X operations center API.
 
-All X network access in this router goes through the official API client. No
-browser, Cookie, CDP, or existing outreach-automation component is imported.
+X reads use a dedicated Playwright/CDP browser profile. The official API client
+is restricted to OAuth token operations and controlled single-item writes.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
@@ -81,10 +83,16 @@ from database.models import (
     XTopicSnapshot,
     XUserOptOut,
 )
-from media_platform.x.client import XApiClient
+from media_platform.x.browser_client import XBrowserClient
+from media_platform.x.browser_session import open_x_browser
+from media_platform.x.client import XWriteApiClient
 from media_platform.x.exception import (
     XApiError,
     XAuthenticationError,
+    XBrowserChallengeRequired,
+    XBrowserError,
+    XBrowserLoginRequired,
+    XBrowserStructureChanged,
     XConfigurationError,
     XForbiddenError,
     XNotFoundError,
@@ -217,6 +225,12 @@ def _topic_payload(
 
 def _post_url(post_id: str) -> str:
     return f"https://x.com/i/web/status/{post_id}" if post_id else ""
+
+
+@asynccontextmanager
+async def _browser_reader():
+    async with open_x_browser() as runtime:
+        yield XBrowserClient(runtime.page, cdp_url=runtime.cdp_url)
 
 
 async def _owned_by_id(
@@ -472,7 +486,7 @@ def _response_observer(
     return observe
 
 
-async def _read_budget_preflight(
+async def _crawl_limit_preflight(
     session: AsyncSession,
     *,
     owner_user_id: str,
@@ -494,7 +508,7 @@ async def _read_budget_preflight(
         raise HTTPException(
             status_code=429,
             detail={
-                "message": "X 每日读取预算已耗尽",
+                "message": "X 每日浏览器采集数量上限已达到",
                 "budget": status.to_dict(),
             },
         )
@@ -513,6 +527,28 @@ def _raise_x_error(exc: XApiError) -> None:
         raise HTTPException(status_code=404, detail=str(exc))
     if isinstance(exc, (XAuthenticationError, XForbiddenError)):
         raise HTTPException(status_code=503, detail=f"X credentials or permissions are invalid: {exc}")
+    raise HTTPException(status_code=502 if exc.retryable else 400, detail=str(exc))
+
+
+def _raise_x_browser_error(exc: XBrowserError) -> None:
+    if isinstance(exc, XBrowserLoginRequired):
+        raise HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, XBrowserChallengeRequired):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(exc),
+                "action": "请在专用 Chrome/CDP 会话中人工完成验证后重试",
+            },
+        )
+    if isinstance(exc, XBrowserStructureChanged):
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": str(exc),
+                "action": "检查 X 页面结构；必要时启用 browser-use 兜底",
+            },
+        )
     raise HTTPException(status_code=502 if exc.retryable else 400, detail=str(exc))
 
 
@@ -586,7 +622,11 @@ async def automation_status(current_user: dict = Depends(get_current_user)):
         return {
             **controls,
             "credentials": {
-                "x_bearer_token": bool(x_config.X_BEARER_TOKEN),
+                "browser_read_source": True,
+                "browser_use_fallback": bool(
+                    x_config.X_BROWSER_USE_FALLBACK_ENABLED
+                    and x_config.X_BROWSER_USE_FALLBACK_COMMAND
+                ),
                 "x_client_id": bool(x_config.X_CLIENT_ID),
                 "token_encryption_key": bool(x_config.TOKEN_ENCRYPTION_KEY),
                 "llm": bool(x_config.LLM_BASE_URL and x_config.LLM_API_KEY and x_config.LLM_MODEL),
@@ -718,13 +758,18 @@ async def oauth_callback(code: str = "", state: str = "", error: str = ""):
         access_token = str(token_payload.get("access_token") or "")
         if not access_token:
             raise RuntimeError("X OAuth response did not include an access token")
-        async with XApiClient(
-            bearer_token=x_config.X_BEARER_TOKEN or access_token,
-            user_access_token=access_token,
-        ) as client:
-            identity = (await client.get_me()).get("data") or {}
-        if not identity.get("id"):
-            raise RuntimeError("X /users/me returned no user identity")
+        try:
+            async with _browser_reader() as client:
+                identity = await client.get_current_identity()
+        except XBrowserError:
+            # Token exchange succeeds without a paid read operation. Browser
+            # identity can be synchronized later from the account test action.
+            identity = {
+                "id": f"oauth:{hashlib.sha256(access_token.encode('utf-8')).hexdigest()[:24]}",
+                "username": "",
+                "name": "",
+                "source": "oauth_token_fingerprint",
+            }
         owner_user_id = str(token_payload["owner_user_id"])
         async with get_session() as session:
             result = await session.execute(
@@ -865,16 +910,11 @@ async def test_account(account_id: int, current_user: dict = Depends(require_x_o
             token = await _account_access_token(session, account)
             if not token:
                 raise XConfigurationError("X user access token is missing or expired")
-            async with XApiClient(
-                bearer_token=x_config.X_BEARER_TOKEN or token,
-                user_access_token=token,
-                response_observer=_response_observer(
-                    session,
-                    owner_user_id=owner_user_id,
-                    account_id=account.id,
-                ),
-            ) as client:
-                identity = (await client.get_me()).get("data") or {}
+            async with _browser_reader() as client:
+                identity = await client.get_current_identity()
+            account.x_user_id = str(identity["id"])
+            account.username = str(identity.get("username") or "")
+            account.display_name = str(identity.get("name") or "")
             account.last_sync_at = _now_ms()
             account.last_error = ""
             account.status = "active"
@@ -883,17 +923,16 @@ async def test_account(account_id: int, current_user: dict = Depends(require_x_o
                 session,
                 owner_user_id=owner_user_id,
                 account_id=account.id,
-                endpoint="GET /2/users/me",
+                endpoint="BROWSER /home identity",
                 read_count=1,
             )
             return {"success": True, "identity": identity, "account": _serialize(account)}
-        except XApiError as exc:
+        except XBrowserError as exc:
             account.last_error = str(exc)[:500]
-            account.write_enabled = False
             account.updated_at = _now_ms()
             await session.commit()
-            _raise_x_error(exc)
-        except ValueError as exc:
+            _raise_x_browser_error(exc)
+        except (ValueError, XApiError) as exc:
             account.last_error = str(exc)[:500]
             account.write_enabled = False
             account.updated_at = _now_ms()
@@ -1047,8 +1086,6 @@ async def refresh_topics(
     current_user: dict = Depends(require_x_operator),
 ):
     owner_user_id = _owner(current_user)
-    if not x_config.X_BEARER_TOKEN:
-        raise HTTPException(status_code=503, detail="X_BEARER_TOKEN 未配置，无法刷新热点")
 
     async with get_session() as session:
         controls = await _controls(session, owner_user_id)
@@ -1100,7 +1137,7 @@ async def refresh_topics(
                 "total": 0,
                 "message": "所有请求地域均处于暂停状态",
             }
-        await _read_budget_preflight(
+        await _crawl_limit_preflight(
             session,
             owner_user_id=owner_user_id,
             requested=len(regions) * body.max_trends,
@@ -1109,25 +1146,20 @@ async def refresh_topics(
         batch_id = uuid.uuid4().hex
         captured_at = _now_ms()
         collected: List[Dict[str, Any]] = []
-        async with XApiClient(
-            bearer_token=x_config.X_BEARER_TOKEN,
-            response_observer=_response_observer(
-                session,
-                owner_user_id=owner_user_id,
-            ),
-        ) as client:
+        async with _browser_reader() as client:
             collector = XCollectionService(client)
             for region in regions:
                 try:
                     result = await collector.collect_trends(
                         woeid=int(region.woeid),
                         region_id=region.id,
+                        region_name=region.name,
                         max_trends=body.max_trends,
                     )
                     await _record_usage(
                         session,
                         owner_user_id=owner_user_id,
-                        endpoint="GET /2/trends/by/woeid/{woeid}",
+                        endpoint="BROWSER /explore/tabs/trending",
                         read_count=len(result["topics"]),
                     )
                     for raw in result["topics"]:
@@ -1203,17 +1235,17 @@ async def refresh_topics(
                     region.next_poll_at = captured_at + int(region.poll_interval_seconds or 900) * 1000
                     region.last_error = ""
                     region.updated_at = captured_at
-                except XApiError as exc:
+                except XBrowserError as exc:
                     region.last_error = str(exc)[:500]
                     region.updated_at = captured_at
                     await _record_usage(
                         session,
                         owner_user_id=owner_user_id,
-                        endpoint="GET /2/trends/by/woeid/{woeid}",
+                        endpoint="BROWSER /explore/tabs/trending",
                         success=False,
                     )
                     await session.commit()
-                    _raise_x_error(exc)
+                    _raise_x_browser_error(exc)
 
         await _audit(
             session,
@@ -1354,8 +1386,6 @@ async def collect_topic_posts(
     current_user: dict = Depends(require_x_operator),
 ):
     owner_user_id = _owner(current_user)
-    if not x_config.X_BEARER_TOKEN:
-        raise HTTPException(status_code=503, detail="X_BEARER_TOKEN 未配置，无法采集帖子")
     async with get_session() as session:
         controls = await _controls(session, owner_user_id)
         if not controls["read_enabled"]:
@@ -1385,19 +1415,13 @@ async def collect_topic_posts(
                     "paused_keywords": paused_keyword_matches,
                 },
             )
-        await _read_budget_preflight(
+        await _crawl_limit_preflight(
             session,
             owner_user_id=owner_user_id,
             requested=body.max_posts,
         )
         try:
-            async with XApiClient(
-                bearer_token=x_config.X_BEARER_TOKEN,
-                response_observer=_response_observer(
-                    session,
-                    owner_user_id=owner_user_id,
-                ),
-            ) as client:
+            async with _browser_reader() as client:
                 collector = XCollectionService(client)
                 result = await collector.collect_topic_posts(
                     topic=topic.raw_name,
@@ -1414,7 +1438,7 @@ async def collect_topic_posts(
             await _record_usage(
                 session,
                 owner_user_id=owner_user_id,
-                endpoint="GET /2/tweets/search/recent",
+                endpoint="BROWSER /search?f=live",
                 read_count=len(stored),
             )
             await _audit(
@@ -1433,15 +1457,15 @@ async def collect_topic_posts(
                 "total": len(stored),
                 "note": generation_note,
             }
-        except XApiError as exc:
+        except XBrowserError as exc:
             await _record_usage(
                 session,
                 owner_user_id=owner_user_id,
-                endpoint="GET /2/tweets/search/recent",
+                endpoint="BROWSER /search?f=live",
                 success=False,
             )
             await session.commit()
-            _raise_x_error(exc)
+            _raise_x_browser_error(exc)
 
 
 @router.get("/posts")
@@ -1517,8 +1541,6 @@ async def collect_thread(
     current_user: dict = Depends(require_x_operator),
 ):
     owner_user_id = _owner(current_user)
-    if not x_config.X_BEARER_TOKEN:
-        raise HTTPException(status_code=503, detail="X_BEARER_TOKEN 未配置，无法采集评论线程")
     async with get_session() as session:
         controls = await _controls(session, owner_user_id)
         if not controls["read_enabled"]:
@@ -1527,19 +1549,13 @@ async def collect_thread(
         root_post_id = local_post.x_post_id if local_post else str(post_id)
         if not root_post_id.isdigit():
             raise HTTPException(status_code=400, detail="需要有效的 X Post ID")
-        await _read_budget_preflight(
+        await _crawl_limit_preflight(
             session,
             owner_user_id=owner_user_id,
             requested=body.max_posts + 1,
         )
         try:
-            async with XApiClient(
-                bearer_token=x_config.X_BEARER_TOKEN,
-                response_observer=_response_observer(
-                    session,
-                    owner_user_id=owner_user_id,
-                ),
-            ) as client:
+            async with _browser_reader() as client:
                 result = await XCollectionService(client).collect_thread(
                     root_post_id=root_post_id,
                     max_posts=body.max_posts,
@@ -1584,14 +1600,8 @@ async def collect_thread(
             await _record_usage(
                 session,
                 owner_user_id=owner_user_id,
-                endpoint="GET /2/tweets/{id}",
-                read_count=1 if stored else 0,
-            )
-            await _record_usage(
-                session,
-                owner_user_id=owner_user_id,
-                endpoint="GET /2/tweets/search/recent",
-                read_count=max(len(stored) - 1, 0),
+                endpoint="BROWSER /i/web/status/{id}",
+                read_count=len(stored),
             )
             await _audit(
                 session,
@@ -1611,7 +1621,7 @@ async def collect_thread(
                 ],
                 "tree": tree,
             }
-        except XApiError as exc:
+        except XBrowserError as exc:
             if local_post:
                 conv_result = await session.execute(
                     select(XConversation).where(
@@ -1627,11 +1637,11 @@ async def collect_thread(
             await _record_usage(
                 session,
                 owner_user_id=owner_user_id,
-                endpoint=getattr(exc, "usage_endpoint", "GET /2/tweets/search/recent"),
+                endpoint=getattr(exc, "usage_endpoint", "BROWSER /i/web/status/{id}"),
                 success=False,
             )
             await session.commit()
-            _raise_x_error(exc)
+            _raise_x_browser_error(exc)
 
 
 @router.get("/conversations/{root_post_id}")
@@ -2406,33 +2416,25 @@ async def publish_review(
             raise HTTPException(status_code=503, detail="X user access token 未配置或已过期，账号写入已关闭")
 
         try:
-            async with XApiClient(
-                bearer_token=x_config.X_BEARER_TOKEN or access_token,
-                user_access_token=access_token,
-                response_observer=_response_observer(
-                    session,
-                    owner_user_id=owner_user_id,
-                    account_id=account.id,
-                ),
-            ) as client:
+            async with _browser_reader() as client:
                 target_payload = await client.lookup_post(post.x_post_id)
             users = included_users(target_payload)
             live_post = map_post(target_payload.get("data") or {}, users_by_id=users)
             await _record_usage(
                 session,
                 owner_user_id=owner_user_id,
-                endpoint="GET /2/tweets/{id}",
+                endpoint="BROWSER /i/web/status/{id} prepublish",
                 read_count=1,
             )
-        except XApiError as exc:
+        except XBrowserError as exc:
             await _record_usage(
                 session,
                 owner_user_id=owner_user_id,
-                endpoint="GET /2/tweets/{id}",
+                endpoint="BROWSER /i/web/status/{id} prepublish",
                 success=False,
             )
             await session.commit()
-            _raise_x_error(exc)
+            _raise_x_browser_error(exc)
 
         own_posts_result = await session.execute(
             select(XPost.x_post_id).where(
@@ -2759,9 +2761,9 @@ async def publish_review(
                 after={"attempt_no": attempt_no, "policy_decision_id": policy_row.id},
             )
         try:
-            async with XApiClient(
-                bearer_token=x_config.X_BEARER_TOKEN or access_token,
+            async with XWriteApiClient(
                 user_access_token=access_token,
+                base_url=x_config.X_WRITE_API_BASE_URL,
                 response_observer=_response_observer(
                     session,
                     owner_user_id=owner_user_id,
@@ -2910,14 +2912,7 @@ async def refresh_mentions(
             owner_user_id=owner_user_id,
             account_id=body.account_id,
         )
-        try:
-            access_token = await _account_access_token(session, account)
-        except ValueError as exc:
-            raise HTTPException(status_code=503, detail=str(exc))
-        if not access_token:
-            await session.commit()
-            raise HTTPException(status_code=503, detail="X user access token 未配置或已过期，无法读取 mentions")
-        await _read_budget_preflight(
+        await _crawl_limit_preflight(
             session,
             owner_user_id=owner_user_id,
             requested=body.max_posts,
@@ -2938,31 +2933,27 @@ async def refresh_mentions(
             ]
             since_id = str(max(numeric_ids)) if numeric_ids else ""
         try:
-            async with XApiClient(
-                bearer_token=x_config.X_BEARER_TOKEN or access_token,
-                user_access_token=access_token,
-                response_observer=_response_observer(
-                    session,
-                    owner_user_id=owner_user_id,
-                    account_id=account.id,
-                ),
-            ) as client:
+            async with _browser_reader() as client:
+                if not account.username:
+                    identity = await client.get_current_identity()
+                    account.x_user_id = str(identity["id"])
+                    account.username = str(identity.get("username") or "")
+                    account.display_name = str(identity.get("name") or "")
                 payload = await client.get_mentions(
-                    account.x_user_id,
+                    account.username,
                     since_id=since_id,
                     max_total=body.max_posts,
-                    user_context=True,
                 )
-        except XApiError as exc:
+        except XBrowserError as exc:
             await _record_usage(
                 session,
                 owner_user_id=owner_user_id,
                 account_id=account.id,
-                endpoint="GET /2/users/{id}/mentions",
+                endpoint="BROWSER /notifications/mentions",
                 success=False,
             )
             await session.commit()
-            _raise_x_error(exc)
+            _raise_x_browser_error(exc)
 
         users = included_users(payload)
         own_posts_result = await session.execute(
@@ -3022,7 +3013,7 @@ async def refresh_mentions(
                 session.add(interaction)
             interaction.opt_in_evidence_json = _json_text(
                 {
-                    "source": "GET /2/users/{id}/mentions",
+                    "source": "BROWSER /notifications/mentions",
                     "user_initiated": True,
                     "interaction_type": interaction_type,
                     "eligibility": eligibility,
@@ -3084,7 +3075,7 @@ async def refresh_mentions(
             session,
             owner_user_id=owner_user_id,
             account_id=account.id,
-            endpoint="GET /2/users/{id}/mentions",
+            endpoint="BROWSER /notifications/mentions",
             read_count=len(stored),
         )
         await _audit(

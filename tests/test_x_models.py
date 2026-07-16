@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""X 官方 API 运营模型的 SQLite 兼容性与租户约束测试。"""
+"""X 浏览器采集与受控写入模型的 SQLite 兼容性测试。"""
 
 import pytest
 from sqlalchemy import Text, create_engine

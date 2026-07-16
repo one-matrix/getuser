@@ -1354,7 +1354,7 @@ class XJob(Base):
 
 
 class XApiUsageDaily(Base):
-    """按租户、账号、日期和Endpoint汇总 X API 用量与估算费用。"""
+    """按租户、账号、日期和来源汇总浏览器采集量与官方写入量。"""
     __tablename__ = 'x_api_usage_daily'
     __table_args__ = (
         UniqueConstraint(
@@ -1370,11 +1370,11 @@ class XApiUsageDaily(Base):
     owner_user_id = Column(String(64), nullable=False, index=True, default='', comment='归属用户ID(数据隔离)')
     account_id = Column(Integer, nullable=False, default=0, index=True, comment='账号ID，0表示App-only读取')
     usage_date = Column(String(10), nullable=False, index=True, comment='UTC日期YYYY-MM-DD')
-    endpoint = Column(String(255), nullable=False, comment='规范化X API Endpoint')
+    endpoint = Column(String(255), nullable=False, comment='浏览器采集来源或官方写入Endpoint')
     request_count = Column(Integer, default=0, comment='请求次数')
     success_count = Column(Integer, default=0, comment='成功次数')
     error_count = Column(Integer, default=0, comment='失败次数')
-    read_resource_count = Column(BigInteger, default=0, comment='读取资源数量')
+    read_resource_count = Column(BigInteger, default=0, comment='浏览器采集资源数量')
     write_count = Column(Integer, default=0, comment='写入次数')
     estimated_cost_micros = Column(BigInteger, default=0, comment='估算费用，百万分之一货币单位')
     budget_limit_micros = Column(BigInteger, default=0, comment='该维度预算上限，0表示未限制')

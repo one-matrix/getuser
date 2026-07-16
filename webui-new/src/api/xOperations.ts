@@ -196,7 +196,8 @@ export interface XReviewTask {
 }
 
 export interface XCredentialStatus {
-  x_bearer_token?: boolean;
+  browser_read_source?: boolean;
+  browser_use_fallback?: boolean;
   llm?: boolean;
   write_token?: boolean;
   fallback_drafts_available?: boolean;
@@ -277,6 +278,9 @@ export interface XUsageSummary {
   estimated_cost?: number;
   budget_ratio?: number;
   forced_read_only?: boolean;
+  request_count?: number;
+  success_count?: number;
+  error_count?: number;
   endpoints?: XEndpointUsage[];
   endpoint_usage?: XEndpointUsage[];
   recent_errors?: XAuditLog[];

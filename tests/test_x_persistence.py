@@ -20,9 +20,8 @@ from database.models import (
     XTopic,
     XTopicSnapshot,
 )
-from media_platform.x.core import XOfficialApiCrawler
-from media_platform.x.exception import XRateLimitError
-from media_platform.x.persistence import XReadBudgetExceeded
+from media_platform.x.core import XBrowserCrawler
+from media_platform.x.persistence import XCrawlLimitExceeded
 
 
 X_PERSISTENCE_TABLES = (
@@ -70,26 +69,14 @@ async def _seed_crawler_task(factory, *, task_id, owner_user_id):
 
 
 class FakeXClient:
-    def __init__(self, *, fail_search=False, rate_limited=False):
+    def __init__(self, *, fail_search=False):
         self.fail_search = fail_search
-        self.rate_limited = rate_limited
         self.search_calls = 0
 
     async def search_topic(self, topic, *, lang=None, max_total=50):
         self.search_calls += 1
-        if self.rate_limited:
-            raise XRateLimitError(
-                "rate limited",
-                status_code=429,
-                reset_at=1784160000,
-                headers={
-                    "x-rate-limit-limit": "10",
-                    "x-rate-limit-remaining": "0",
-                    "x-rate-limit-reset": "1784160000",
-                },
-            )
         if self.fail_search:
-            raise RuntimeError("X search unavailable")
+            raise RuntimeError("X browser search unavailable")
         return {
             "query": f'"{topic}" -is:retweet',
             "data": [
@@ -122,7 +109,7 @@ class FakeXClient:
             "meta": {"result_count": 1},
         }
 
-    async def get_trends(self, woeid, *, max_trends=20):
+    async def get_trends(self, woeid, *, max_trends=20, region_name=""):
         return {
             "data": [
                 {"trend_name": "#Launch", "tweet_count": 123},
@@ -156,7 +143,7 @@ async def test_search_task_persists_topic_snapshot_post_and_job(
         owner_user_id="owner-1",
     )
 
-    crawler = XOfficialApiCrawler(
+    crawler = XBrowserCrawler(
         FakeXClient(),
         session_factory=factory,
         task_id="task-x-search",
@@ -184,7 +171,7 @@ async def test_search_task_persists_topic_snapshot_post_and_job(
     assert job.status == "succeeded"
     assert json.loads(job.payload_json)["task_id"] == "task-x-search"
     assert json.loads(job.result_json)["post_count"] == 1
-    assert usage.endpoint == "GET /2/tweets/search/recent"
+    assert usage.endpoint == "BROWSER /search?f=live"
     assert usage.request_count == 1
     assert usage.success_count == 1
     assert usage.read_resource_count == 1
@@ -201,7 +188,7 @@ async def test_trending_task_persists_topics_snapshots_and_job(
     monkeypatch.setattr(x_config, "X_MAX_TOPICS_PER_CYCLE", 5)
     monkeypatch.delenv("X_CRAWLER_MODE", raising=False)
 
-    crawler = XOfficialApiCrawler(
+    crawler = XBrowserCrawler(
         FakeXClient(),
         session_factory=factory,
         owner_user_id="owner-2",
@@ -244,14 +231,14 @@ async def test_repeated_search_updates_post_without_duplicate_rows(
         now[0] += 1
         return now[0]
 
-    first = await XOfficialApiCrawler(
+    first = await XBrowserCrawler(
         FakeXClient(),
         session_factory=factory,
         owner_user_id="owner-repeat",
         task_id="task-repeat",
         clock_ms=clock_ms,
     ).start()
-    second = await XOfficialApiCrawler(
+    second = await XBrowserCrawler(
         FakeXClient(),
         session_factory=factory,
         owner_user_id="owner-repeat",
@@ -281,13 +268,13 @@ async def test_search_failure_is_recorded_on_x_job(
     monkeypatch.delenv("X_CRAWLER_MODE", raising=False)
     monkeypatch.delenv("X_SEARCH_TOPIC", raising=False)
 
-    crawler = XOfficialApiCrawler(
+    crawler = XBrowserCrawler(
         FakeXClient(fail_search=True),
         session_factory=factory,
         owner_user_id="owner-3",
         task_id="task-x-failed",
     )
-    with pytest.raises(RuntimeError, match="unavailable"):
+    with pytest.raises(RuntimeError, match="browser search unavailable"):
         await crawler.start()
 
     async with factory() as session:
@@ -298,7 +285,7 @@ async def test_search_failure_is_recorded_on_x_job(
 
 
 @pytest.mark.asyncio
-async def test_budget_preflight_blocks_api_call_and_marks_usage(
+async def test_crawl_limit_preflight_blocks_browser_call_and_marks_usage(
     x_persistence_store,
     monkeypatch,
 ):
@@ -306,7 +293,7 @@ async def test_budget_preflight_blocks_api_call_and_marks_usage(
     monkeypatch.setattr(config, "CRAWLER_TYPE", "search")
     monkeypatch.setattr(config, "KEYWORDS", "MediaCrawler")
     monkeypatch.setattr(x_config, "X_READ_ENABLED", True)
-    monkeypatch.setattr(x_config, "X_DAILY_POST_READ_BUDGET", 1)
+    monkeypatch.setattr(x_config, "X_DAILY_CRAWLED_POST_LIMIT", 1)
     monkeypatch.delenv("X_CRAWLER_MODE", raising=False)
     monkeypatch.delenv("X_SEARCH_TOPIC", raising=False)
     async with factory() as session:
@@ -315,7 +302,7 @@ async def test_budget_preflight_blocks_api_call_and_marks_usage(
                 owner_user_id="owner-budget",
                 account_id=0,
                 usage_date="2026-07-16",
-                endpoint="GET /2/tweets/search/recent",
+                endpoint="BROWSER /search?f=live",
                 read_resource_count=1,
                 created_at=1,
                 updated_at=1,
@@ -327,13 +314,13 @@ async def test_budget_preflight_blocks_api_call_and_marks_usage(
 
     monkeypatch.setattr(persistence_module, "utc_usage_date", lambda: "2026-07-16")
     client = FakeXClient()
-    crawler = XOfficialApiCrawler(
+    crawler = XBrowserCrawler(
         client,
         session_factory=factory,
         owner_user_id="owner-budget",
         task_id="task-budget",
     )
-    with pytest.raises(XReadBudgetExceeded):
+    with pytest.raises(XCrawlLimitExceeded):
         await crawler.start()
 
     assert client.search_calls == 0
@@ -348,37 +335,3 @@ async def test_budget_preflight_blocks_api_call_and_marks_usage(
         job = (await session.execute(select(XJob))).scalar_one()
     assert usage.budget_exhausted is True
     assert job.status == "failed"
-
-
-@pytest.mark.asyncio
-async def test_rate_limit_error_records_usage_and_reset_state(
-    x_persistence_store,
-    monkeypatch,
-):
-    _, factory = x_persistence_store
-    monkeypatch.setattr(config, "CRAWLER_TYPE", "search")
-    monkeypatch.setattr(config, "KEYWORDS", "MediaCrawler")
-    monkeypatch.setattr(x_config, "X_READ_ENABLED", True)
-    monkeypatch.setattr(x_config, "X_DAILY_POST_READ_BUDGET", 100)
-    monkeypatch.delenv("X_CRAWLER_MODE", raising=False)
-    monkeypatch.delenv("X_SEARCH_TOPIC", raising=False)
-
-    crawler = XOfficialApiCrawler(
-        FakeXClient(rate_limited=True),
-        session_factory=factory,
-        owner_user_id="owner-rate",
-        task_id="task-rate",
-    )
-    with pytest.raises(XRateLimitError):
-        await crawler.start()
-
-    async with factory() as session:
-        usage = (await session.execute(select(XApiUsageDaily))).scalar_one()
-        rate = (await session.execute(select(XRateLimitState))).scalar_one()
-    assert usage.request_count == 1
-    assert usage.error_count == 1
-    assert usage.read_resource_count == 0
-    assert rate.endpoint == "GET /2/tweets/search/recent"
-    assert rate.remaining == 0
-    assert rate.reset_at == 1784160000000
-    assert rate.last_http_status == 429

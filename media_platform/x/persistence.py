@@ -1,4 +1,4 @@
-"""Persistence adapter for official X collection results."""
+"""Persistence adapter for browser-collected X results."""
 
 from __future__ import annotations
 
@@ -53,12 +53,15 @@ class XInlineRun:
     started_at: int
 
 
-class XReadBudgetExceeded(RuntimeError):
-    """The tenant's configured daily read-resource budget is exhausted."""
+class XCrawlLimitExceeded(RuntimeError):
+    """The tenant's configured daily browser collection limit is exhausted."""
 
     def __init__(self, budget: Mapping[str, Any]) -> None:
-        super().__init__("X daily Post read budget is exhausted")
+        super().__init__("X daily browser collection limit is exhausted")
         self.budget = dict(budget)
+
+
+XReadBudgetExceeded = XCrawlLimitExceeded
 
 
 class XCollectionPersistence:
@@ -136,7 +139,7 @@ class XCollectionPersistence:
             row.updated_at = now_ms
             await session.commit()
 
-    async def preflight_read_budget(
+    async def preflight_crawl_limit(
         self,
         *,
         endpoint: str,
@@ -161,8 +164,21 @@ class XCollectionPersistence:
                 item.budget_exhausted = True
                 item.updated_at = self.clock_ms()
                 await session.commit()
-                raise XReadBudgetExceeded(status.to_dict())
+                raise XCrawlLimitExceeded(status.to_dict())
             return status.to_dict()
+
+    async def preflight_read_budget(
+        self,
+        *,
+        endpoint: str,
+        requested: int,
+    ) -> Dict[str, Any]:
+        """Compatibility wrapper for callers using the previous API vocabulary."""
+
+        return await self.preflight_crawl_limit(
+            endpoint=endpoint,
+            requested=requested,
+        )
 
     async def record_usage(
         self,

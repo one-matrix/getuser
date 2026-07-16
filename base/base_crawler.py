@@ -48,8 +48,7 @@ class AbstractCrawler(ABC):
 class AbstractBrowserCrawler(AbstractCrawler):
     """Base class for platforms that require Playwright or CDP.
 
-    Official API based platforms, such as X, should inherit from
-    ``AbstractCrawler`` directly and must not initialize a browser.
+    Browser-collected platforms, including X, inherit from this class.
     """
 
     @abstractmethod

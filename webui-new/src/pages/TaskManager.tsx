@@ -1460,8 +1460,8 @@ const TaskManager: React.FC = () => {
                   type="info"
                   showIcon
                   style={{ marginBottom: 16 }}
-                  message="X 任务只使用官方 API"
-                  description="热点模式按地域定时抓取；关键词模式采集近期帖子。发布仍在“X 运营”中逐条审核，任务不会自动评论。"
+                  message="X 读取使用专用浏览器"
+                  description="热点、关键词帖子和评论通过 Playwright/CDP 抓取；发布仍在“X 运营”中逐条审核，任务不会自动评论。"
                 />
               )}
 
@@ -1529,7 +1529,7 @@ const TaskManager: React.FC = () => {
               {selectedCreatePlatform === 'x' ? (
                 <div style={{ padding: 12, background: '#e6f4ff', borderRadius: 8, marginBottom: 16 }}>
                   <div style={{ fontSize: 13, color: '#1677ff' }}>
-                    每轮采集量由 X 读取预算和 X_MAX_TOPICS_PER_CYCLE / X_MAX_POSTS_PER_TOPIC 安全上限控制。
+                    每轮采集量由每日浏览器采集上限和 X_MAX_TOPICS_PER_CYCLE / X_MAX_POSTS_PER_TOPIC 控制。
                   </div>
                 </div>
               ) : (
@@ -1587,7 +1587,7 @@ const TaskManager: React.FC = () => {
                   )}
                   <div>
                     <strong>采集范围：</strong>
-                    {previewData.platform === 'x' ? '按 X API 预算与每轮安全上限' : '♾️ 不限（尽可能多爬）'}
+                    {previewData.platform === 'x' ? '按浏览器采集数量与每轮安全上限' : '♾️ 不限（尽可能多爬）'}
                   </div>
                   <div><strong>预计耗时：</strong>取决于关键词热度</div>
                 </div>

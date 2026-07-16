@@ -1126,7 +1126,7 @@ export default function XOperations() {
               <Col>
                 <Popconfirm
                   title="确认从 X 刷新热点？"
-                  description="此操作会消耗读取预算，并创建单次采集任务。"
+                  description="使用专用 Chrome/CDP 会话读取 X 页面，并计入每日采集数量上限。"
                   okText="确认刷新"
                   cancelText="取消"
                   onConfirm={() => runAction('refresh-topics', () => refreshXTopics(), '热点刷新任务已提交')}
@@ -1255,12 +1255,12 @@ export default function XOperations() {
                 },
               },
               {
-                title: '读取成本',
+                title: '采集来源',
                 key: 'cost',
                 width: 100,
-                render: (_, record) => (
-                  <Tooltip title="估算值，最终以 X API 实际返回资源数为准">
-                    <Text>{record.estimated_cost ?? record.read_cost ?? '—'}</Text>
+                render: () => (
+                  <Tooltip title="热点、帖子和评论均由 Playwright/CDP 浏览器采集，不调用 X Official API Read operations">
+                    <Tag color="blue">浏览器</Tag>
                   </Tooltip>
                 ),
               },
@@ -1281,7 +1281,7 @@ export default function XOperations() {
                     </Button>
                     <Popconfirm
                       title="确认采集该热点的相关帖子？"
-                      description="默认最多读取 50 条近期帖子，会消耗 X API 预算。"
+                      description="默认最多从 X 搜索页采集 50 条近期帖子，并计入每日采集数量上限。"
                       okText="确认采集"
                       cancelText="取消"
                       onConfirm={() => runAction(
@@ -1440,7 +1440,7 @@ export default function XOperations() {
                   <Space wrap>
                     <Popconfirm
                       title="确认采集该帖子线程？"
-                      description="会读取回复并消耗 X API 预算。"
+                      description="会通过浏览器展开原帖页面并采集可见回复。"
                       okText="确认采集"
                       cancelText="取消"
                       onConfirm={() => handleCollectThread(record)}
@@ -1630,7 +1630,7 @@ export default function XOperations() {
             type="info"
             showIcon
             message="单条审核、单条发布"
-            description="本页面不提供批量批准或批量发布。编辑文本后必须重新批准；发布时再次校验 Kill Switch、账号权限、目标帖子、内容哈希与预算。"
+            description="本页面不提供批量批准或批量发布。编辑文本后必须重新批准；发布时再次校验 Kill Switch、账号权限、浏览器中的目标帖子、内容哈希与写入预算。"
             style={{ marginBottom: 16 }}
           />
           <Card size="small" style={{ marginBottom: 16 }}>
@@ -1690,7 +1690,7 @@ export default function XOperations() {
                 : !reviewAccountWriteReady
                   ? '目标账号未启用写入或账号状态不可用'
                 : review.api_reply_eligible !== true
-                  ? (reviewEligibilityReason(review) || '目标不满足 X API 回复资格，请复制草稿后手工发布')
+                  ? (reviewEligibilityReason(review) || '目标不满足受控回复资格，请复制草稿后手工发布')
                   : approvedTextChanged
                     ? '当前文本与已批准版本不同，请重新批准后再发布'
                   : !['APPROVED', 'QUEUED', 'PUBLISH_FAILED'].includes(status)
@@ -1723,7 +1723,7 @@ export default function XOperations() {
                           </Paragraph>
                           <Space wrap>
                             {review.api_reply_eligible === true
-                              ? <Tag color="success" icon={<CheckCircleOutlined />}>API 可回复</Tag>
+                              ? <Tag color="success" icon={<CheckCircleOutlined />}>受控写入可回复</Tag>
                               : <Tag color="warning" icon={<WarningOutlined />}>仅草稿 / 手工发布</Tag>}
                             {review.requires_fact_check && <Tag color="warning">需要事实核验</Tag>}
                           </Space>
@@ -1944,7 +1944,7 @@ export default function XOperations() {
             type="warning"
             showIcon
             message="安全控制仅管理员可修改"
-            description="自动回复必须同时满足 X 书面批准、用户主动互动、API 回复资格、低风险策略和预算限制。任何单项开关都不能绕过后端资格检查。"
+            description="自动回复必须同时满足 X 书面批准、用户主动互动、浏览器实时校验、低风险策略和写入预算限制。任何单项开关都不能绕过后端资格检查。"
             style={{ marginBottom: 16 }}
           />
 
@@ -2016,7 +2016,7 @@ export default function XOperations() {
                     {
                       key: 'read_enabled' as const,
                       title: '只读采集',
-                      description: '允许调用 X 官方 API 读取热点、帖子和主动互动。',
+                      description: '允许专用 Playwright/CDP 浏览器读取热点、帖子、评论和主动互动。',
                       value: automation.read_enabled,
                     },
                     {
@@ -2212,7 +2212,7 @@ export default function XOperations() {
       label: (
         <Space size={6}>
           <WalletOutlined />
-          账号与预算
+          账号与用量
         </Space>
       ),
       children: (
@@ -2221,7 +2221,7 @@ export default function XOperations() {
             <Col xs={24} sm={12} xl={6}>
               <Card>
                 <Statistic
-                  title="本日 Post 读取资源"
+                  title="本日浏览器采集条目"
                   value={usage.unique_post_reads ?? usage.post_reads ?? 0}
                   suffix={usage.post_read_budget ? `/ ${usage.post_read_budget}` : undefined}
                   prefix={<MessageOutlined />}
@@ -2237,17 +2237,11 @@ export default function XOperations() {
             <Col xs={24} sm={12} xl={6}>
               <Card>
                 <Statistic
-                  title="本日 User 读取资源"
-                  value={usage.unique_user_reads ?? usage.user_reads ?? 0}
-                  suffix={usage.user_read_budget ? `/ ${usage.user_read_budget}` : undefined}
+                  title="本日采集操作"
+                  value={usage.request_count ?? 0}
                   prefix={<UserOutlined />}
                 />
-                <Progress
-                  percent={percentOf(usage.unique_user_reads ?? usage.user_reads, usage.user_read_budget)}
-                  status={percentOf(usage.unique_user_reads ?? usage.user_reads, usage.user_read_budget) >= 100 ? 'exception' : 'normal'}
-                  size="small"
-                  style={{ marginTop: 12 }}
-                />
+                <Text type="secondary">热点、搜索、线程、mentions 与账号识别</Text>
               </Card>
             </Col>
             <Col xs={24} sm={12} xl={6}>
@@ -2269,15 +2263,15 @@ export default function XOperations() {
             <Col xs={24} sm={12} xl={6}>
               <Card>
                 <Statistic
-                  title="估算 API 成本"
-                  value={usage.estimated_cost ?? 0}
-                  precision={4}
-                  prefix={<WalletOutlined />}
+                  title="读取通道"
+                  value="Playwright / CDP"
+                  prefix={<GlobalOutlined />}
                 />
                 <Space style={{ marginTop: 12 }}>
                   {usage.forced_read_only
-                    ? <Tag color="error">预算触发只读</Tag>
-                    : <Tag color="success">预算内</Tag>}
+                    ? <Tag color="error">达到采集上限</Tag>
+                    : <Tag color="success">不调用付费 Read API</Tag>}
+                  {automation.credentials?.browser_use_fallback && <Tag color="blue">browser-use 兜底</Tag>}
                 </Space>
               </Card>
             </Col>
@@ -2287,7 +2281,7 @@ export default function XOperations() {
             <Alert
               type="error"
               showIcon
-              message="预算已达到阈值，后端已自动切换为只读"
+              message="每日浏览器采集数量已达到上限；写入仍由独立安全开关控制"
               style={{ marginTop: 16 }}
             />
           )}
@@ -2465,11 +2459,11 @@ export default function XOperations() {
 
           <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
             <Col xs={24} xl={14}>
-              <Card title="Endpoint 用量与速率">
+              <Card title="采集与写入用量">
                 <Table<XEndpointUsage>
                   rowKey={(record, index) => `${record.endpoint || record.resource || 'endpoint'}-${index}`}
                   dataSource={endpointUsage}
-                  locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 API 用量记录" /> }}
+                  locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无采集或写入用量记录" /> }}
                   pagination={false}
                   size="small"
                   columns={[
@@ -2484,7 +2478,7 @@ export default function XOperations() {
                       render: (_, record) => record.requests ?? record.request_count ?? 0,
                     },
                     {
-                      title: '读取 / 写入',
+                      title: '采集 / 写入',
                       key: 'resources',
                       render: (_, record) => `${record.read_count ?? record.read_resource_count ?? 0} / ${record.write_count ?? 0}`,
                     },
@@ -2501,19 +2495,18 @@ export default function XOperations() {
                       render: (value: string | number | undefined) => formatDate(value),
                     },
                     {
-                      title: '估算成本',
-                      key: 'estimated_cost',
-                      render: (_, record) => (
-                        record.estimated_cost
-                        ?? (record.estimated_cost_micros != null ? record.estimated_cost_micros / 1_000_000 : '—')
-                      ),
+                      title: '通道',
+                      key: 'channel',
+                      render: (_, record) => String(record.endpoint || '').startsWith('BROWSER')
+                        ? <Tag color="blue">浏览器</Tag>
+                        : <Tag color="warning">Official Write</Tag>,
                     },
                   ]}
                 />
               </Card>
             </Col>
             <Col xs={24} xl={10}>
-              <Card title="最近 API 错误">
+              <Card title="最近运行错误">
                 <List
                   size="small"
                   dataSource={recentErrors}
@@ -2526,7 +2519,7 @@ export default function XOperations() {
                           <Space wrap>
                             {log.http_status && <Tag color="error">{log.http_status}</Tag>}
                             {log.error_code && <Tag>{log.error_code}</Tag>}
-                            <Text>{log.action || 'X API'}</Text>
+                            <Text>{log.action || 'X 运行任务'}</Text>
                           </Space>
                         )}
                         description={(
@@ -2615,8 +2608,8 @@ export default function XOperations() {
             <Tag color={automation.auto_reply_enabled ? 'warning' : 'default'}>
               自动回复 {automation.auto_reply_enabled ? '开启' : '关闭'}
             </Tag>
-            <Tag color={automation.credentials?.x_bearer_token ? 'success' : 'default'}>
-              读取凭证 {automation.credentials?.x_bearer_token ? '就绪' : '未配置'}
+            <Tag color={automation.credentials?.browser_read_source ? 'success' : 'default'}>
+              浏览器读取 {automation.credentials?.browser_read_source ? '已启用' : '不可用'}
             </Tag>
             <Tag color={hasWriteToken ? 'success' : 'default'}>
               写入凭证 {hasWriteToken ? '就绪' : '未配置'}
