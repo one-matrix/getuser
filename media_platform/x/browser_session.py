@@ -25,6 +25,7 @@ else:
 
 _BROWSER_LOCK = asyncio.Lock()
 _CDP_PORT_MARKER = ".mediacrawler-cdp-port"
+_OPERATIONS_PAGE_MARKER = "__mediacrawler_x_operations__"
 
 
 @dataclass
@@ -211,9 +212,37 @@ def open_x_login_window() -> dict[str, Any]:
     }
 
 
+async def _runtime_page(context: BrowserContext, *, retain_page: bool) -> Page:
+    """Reuse the dedicated operations tab without taking over a user tab."""
+
+    if retain_page:
+        for candidate in reversed(list(getattr(context, "pages", []) or [])):
+            try:
+                if candidate.is_closed():
+                    continue
+                if await candidate.evaluate("window.name") == _OPERATIONS_PAGE_MARKER:
+                    return candidate
+            except Exception:
+                continue
+    page = await context.new_page()
+    if retain_page:
+        try:
+            await page.evaluate(
+                "marker => { window.name = marker; }",
+                _OPERATIONS_PAGE_MARKER,
+            )
+        except Exception:
+            pass
+    return page
+
+
 @asynccontextmanager
-async def open_x_browser() -> AsyncIterator[XBrowserRuntime]:
-    """Open one X tab while preventing concurrent control of the same profile."""
+async def open_x_browser(*, retain_page: bool = False) -> AsyncIterator[XBrowserRuntime]:
+    """Open one X tab while preventing concurrent control of the same profile.
+
+    Interactive writes can retain and reuse one marked operations tab in an
+    already-running CDP browser. Read-only jobs still use short-lived tabs.
+    """
 
     try:
         await asyncio.wait_for(
@@ -233,6 +262,7 @@ async def open_x_browser() -> AsyncIterator[XBrowserRuntime]:
     manager: Optional[CDPBrowserManager] = None
     cdp_url = ""
     owns_context = False
+    retain_runtime_page = False
     try:
         profile_dir = Path(x_browser_profile_dir())
         os.makedirs(profile_dir, exist_ok=True)
@@ -294,7 +324,8 @@ async def open_x_browser() -> AsyncIterator[XBrowserRuntime]:
             context = await playwright.chromium.launch_persistent_context(**launch_options)
             owns_context = True
 
-        page = await context.new_page()
+        retain_runtime_page = bool(retain_page and cdp_url)
+        page = await _runtime_page(context, retain_page=retain_runtime_page)
         page.set_default_timeout(x_config.X_BROWSER_OPERATION_TIMEOUT_SECONDS * 1000)
         yield XBrowserRuntime(
             page=page,
@@ -303,7 +334,7 @@ async def open_x_browser() -> AsyncIterator[XBrowserRuntime]:
             cdp_manager=manager,
         )
     finally:
-        if page is not None:
+        if page is not None and not retain_runtime_page:
             try:
                 await page.close()
             except Exception:

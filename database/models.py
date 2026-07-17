@@ -886,7 +886,7 @@ class KeywordCategory(Base):
 
 
 class XAccount(Base):
-    """X OAuth 账号及写入审批状态。Token 字段只允许保存加密密文。"""
+    """X 浏览器/OAuth 账号审计身份。Token 字段只允许保存加密密文。"""
     __tablename__ = 'x_accounts'
     __table_args__ = (
         UniqueConstraint('owner_user_id', 'x_user_id', name='uq_x_accounts_owner_x_user'),
@@ -1215,12 +1215,12 @@ class XPublishJob(Base):
     __tablename__ = 'x_publish_jobs'
     __table_args__ = (
         UniqueConstraint('owner_user_id', 'idempotency_key', name='uq_x_publish_jobs_owner_key'),
-        UniqueConstraint(
+        Index(
+            'ix_x_publish_jobs_owner_account_target_mode',
             'owner_user_id',
             'account_id',
             'target_post_id',
             'publish_mode',
-            name='uq_x_publish_jobs_owner_account_target_mode',
         ),
         UniqueConstraint(
             'owner_user_id',

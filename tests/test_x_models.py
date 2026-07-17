@@ -144,6 +144,49 @@ def test_publish_job_enforces_tenant_idempotency_key(x_engine):
         session.close()
 
 
+def test_manual_publish_allows_multiple_texts_for_same_target(x_engine):
+    common = {
+        "owner_user_id": "owner-a",
+        "account_id": 1,
+        "target_post_id": "post-1",
+        "publish_mode": "manual_review",
+        "interaction_id": None,
+    }
+    session = Session(bind=x_engine)
+    try:
+        session.add_all(
+            [
+                XPublishJob(
+                    **common,
+                    reply_candidate_id=10,
+                    review_task_id=30,
+                    policy_decision_id=20,
+                    reply_text="First manual comment.",
+                    approval_content_hash="hash-1",
+                    idempotency_key="publish-key-1",
+                ),
+                XPublishJob(
+                    **common,
+                    reply_candidate_id=11,
+                    review_task_id=31,
+                    policy_decision_id=21,
+                    reply_text="Second manual comment.",
+                    approval_content_hash="hash-2",
+                    idempotency_key="publish-key-2",
+                ),
+            ]
+        )
+        session.commit()
+
+        jobs = session.query(XPublishJob).order_by(XPublishJob.id.asc()).all()
+        assert [job.reply_text for job in jobs] == [
+            "First manual comment.",
+            "Second manual comment.",
+        ]
+    finally:
+        session.close()
+
+
 def test_generic_scheduler_has_interval_configuration():
     column = CrawlerTaskModel.__table__.columns["schedule_interval_seconds"]
     assert column.default.arg == 900

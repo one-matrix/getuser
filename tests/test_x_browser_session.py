@@ -1,9 +1,60 @@
 from contextlib import nullcontext
 from types import SimpleNamespace
 
+import pytest
+
 from config import x_config
 from media_platform.x import browser_session
 from tools import browser_launcher
+
+
+class FakeRuntimePage:
+    def __init__(self, marker=""):
+        self.marker = marker
+        self.closed = False
+
+    def is_closed(self):
+        return self.closed
+
+    async def evaluate(self, script, *args):
+        if args:
+            self.marker = args[0]
+            return None
+        return self.marker
+
+
+class FakeRuntimeContext:
+    def __init__(self, pages=None):
+        self.pages = list(pages or [])
+        self.created = 0
+
+    async def new_page(self):
+        self.created += 1
+        page = FakeRuntimePage()
+        self.pages.append(page)
+        return page
+
+
+@pytest.mark.asyncio
+async def test_runtime_page_reuses_marked_operations_tab():
+    user_page = FakeRuntimePage()
+    operations_page = FakeRuntimePage(browser_session._OPERATIONS_PAGE_MARKER)
+    context = FakeRuntimeContext([user_page, operations_page])
+
+    page = await browser_session._runtime_page(context, retain_page=True)
+
+    assert page is operations_page
+    assert context.created == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_page_marks_new_operations_tab():
+    context = FakeRuntimeContext([FakeRuntimePage()])
+
+    page = await browser_session._runtime_page(context, retain_page=True)
+
+    assert context.created == 1
+    assert page.marker == browser_session._OPERATIONS_PAGE_MARKER
 
 
 def test_profile_cdp_port_only_returns_a_live_profile_port(tmp_path, monkeypatch):

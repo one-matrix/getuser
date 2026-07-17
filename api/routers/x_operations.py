@@ -1,7 +1,8 @@
 """X operations center API.
 
-X reads use a dedicated Playwright/CDP browser profile. The official API client
-is restricted to OAuth token operations and controlled single-item writes.
+X reads and explicitly confirmed operator comments use the dedicated
+Playwright/CDP browser profile. OAuth remains available for controlled worker
+writes that must run without an operator-owned browser session.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from api.schemas.x_operations import (
     XAutomationControlsRequest,
     XConversationAnalysisRequest,
     XInteractionEvaluateRequest,
+    XManualCommentRequest,
     XMentionsRefreshRequest,
     XOAuthStartRequest,
     XOptOutRequest,
@@ -57,6 +59,7 @@ from api.services.x.policy_service import (
     default_controls,
     detect_opt_out,
     evaluate_publication_policy,
+    max_duplicate_score,
     scan_content_risk,
 )
 from api.services.x.publish_service import XPublisher, build_idempotency_key
@@ -233,15 +236,69 @@ def _post_url(post_id: str) -> str:
 
 
 @asynccontextmanager
-async def _browser_reader():
+async def _browser_reader(*, retain_page: bool = False):
     stack = AsyncExitStack()
     try:
-        runtime = await stack.enter_async_context(open_x_browser())
+        runtime = await stack.enter_async_context(
+            open_x_browser(retain_page=retain_page)
+        )
     except XBrowserError as exc:
         await stack.aclose()
         _raise_x_browser_error(exc)
     async with stack:
         yield XBrowserClient(runtime.page, cdp_url=runtime.cdp_url)
+
+
+async def _upsert_browser_identity_account(
+    session: AsyncSession,
+    *,
+    owner_user_id: str,
+    identity: Mapping[str, Any],
+) -> tuple[XAccount, bool]:
+    """Resolve the currently logged-in browser identity to an audit account."""
+
+    username = str(identity.get("username") or "").strip().lstrip("@")
+    if not username:
+        raise HTTPException(status_code=502, detail="浏览器已打开 X，但无法识别当前登录账号")
+    browser_user_id = str(identity.get("id") or f"web:{username.casefold()}")
+    result = await session.execute(
+        select(XAccount)
+        .where(
+            XAccount.owner_user_id == owner_user_id,
+            or_(
+                XAccount.x_user_id == browser_user_id,
+                func.lower(XAccount.username) == username.casefold(),
+            ),
+        )
+        .order_by(XAccount.id)
+        .limit(1)
+    )
+    account = result.scalars().first()
+    created = account is None
+    now = _now_ms()
+    if account is None:
+        account = XAccount(
+            owner_user_id=owner_user_id,
+            x_user_id=browser_user_id,
+            username=username,
+            display_name=str(identity.get("name") or ""),
+            account_type="brand",
+            granted_scopes="[]",
+            write_enabled=False,
+            auto_reply_enabled=False,
+            status="active",
+            created_at=now,
+        )
+        session.add(account)
+    else:
+        account.username = username
+        account.display_name = str(identity.get("name") or account.display_name or "")
+        account.status = "active"
+    account.last_sync_at = now
+    account.last_error = ""
+    account.updated_at = now
+    await session.flush()
+    return account, created
 
 
 async def _owned_by_id(
@@ -261,11 +318,27 @@ async def _owned_post(
     identifier: str,
     owner_user_id: str,
 ) -> Optional[XPost]:
-    conditions = [XPost.owner_user_id == owner_user_id, XPost.x_post_id == str(identifier)]
-    if str(identifier).isdigit():
-        conditions.append(and_(XPost.owner_user_id == owner_user_id, XPost.id == int(identifier)))
-    result = await session.execute(select(XPost).where(or_(*conditions)))
+    lookup_conditions = [XPost.x_post_id == str(identifier)]
+    local_post_id = _local_post_pk(identifier)
+    if local_post_id is not None:
+        lookup_conditions.append(XPost.id == local_post_id)
+    result = await session.execute(
+        select(XPost).where(
+            XPost.owner_user_id == owner_user_id,
+            or_(*lookup_conditions),
+        )
+    )
     return result.scalars().first()
+
+
+def _local_post_pk(identifier: Any) -> Optional[int]:
+    """Return a safe PostgreSQL INTEGER primary key, never a 64-bit X ID."""
+
+    value = str(identifier).strip()
+    if not value.isdigit():
+        return None
+    parsed = int(value)
+    return parsed if 0 < parsed <= 2_147_483_647 else None
 
 
 async def _audit(
@@ -648,9 +721,10 @@ async def browser_status(current_user: dict = Depends(get_current_user)):
 async def sync_browser_account(
     current_user: dict = Depends(require_x_operator),
 ):
-    """Verify the logged-in browser profile and create a draft-only account.
+    """Verify the logged-in browser profile and create its local audit identity.
 
-    This path does not call an X read API and does not create write credentials.
+    This path does not call an X API or create OAuth credentials.  The resolved
+    identity can be used for collection, drafts and explicit browser comments.
     An OAuth binding with the same username is enriched instead of duplicated.
     """
 
@@ -661,49 +735,12 @@ async def sync_browser_account(
     except XBrowserError as exc:
         _raise_x_browser_error(exc)
 
-    username = str(identity.get("username") or "").strip().lstrip("@")
-    if not username:
-        raise HTTPException(status_code=502, detail="浏览器已打开 X，但无法识别当前登录账号")
-
-    browser_user_id = str(identity.get("id") or f"web:{username.casefold()}")
-    now = _now_ms()
     async with get_session() as session:
-        result = await session.execute(
-            select(XAccount)
-            .where(
-                XAccount.owner_user_id == owner_user_id,
-                or_(
-                    XAccount.x_user_id == browser_user_id,
-                    func.lower(XAccount.username) == username.casefold(),
-                ),
-            )
-            .order_by(XAccount.id)
-            .limit(1)
+        account, created = await _upsert_browser_identity_account(
+            session,
+            owner_user_id=owner_user_id,
+            identity=identity,
         )
-        account = result.scalars().first()
-        created = account is None
-        if account is None:
-            account = XAccount(
-                owner_user_id=owner_user_id,
-                x_user_id=browser_user_id,
-                username=username,
-                display_name=str(identity.get("name") or ""),
-                account_type="brand",
-                granted_scopes="[]",
-                write_enabled=False,
-                auto_reply_enabled=False,
-                status="active",
-                created_at=now,
-            )
-            session.add(account)
-        else:
-            account.username = username
-            account.display_name = str(identity.get("name") or account.display_name or "")
-            account.status = "active"
-        account.last_sync_at = now
-        account.last_error = ""
-        account.updated_at = now
-        await session.flush()
         await _record_usage(
             session,
             owner_user_id=owner_user_id,
@@ -736,7 +773,7 @@ async def sync_browser_account(
         payload["browser_synced"] = True
         return {
             "success": True,
-            "message": f"已识别浏览器登录账号 @{username}，可用于采集和 AI 草稿",
+            "message": f"已识别浏览器登录账号 @{account.username}，可用于采集、AI 草稿和人工确认评论",
             "identity": identity,
             "account": payload,
             "browser": x_browser_profile_status(),
@@ -806,6 +843,9 @@ async def automation_status(current_user: dict = Depends(get_current_user)):
                 for account in accounts
             ],
             "effective_write_allowed": not reasons,
+            "effective_browser_write_allowed": bool(
+                controls["write_enabled"] and not controls["global_kill_switch"]
+            ),
             "reasons": reasons,
             "security_defaults": {
                 "write_enabled": False,
@@ -851,18 +891,17 @@ async def update_automation_controls(
 
     async with get_session() as session:
         if body.auto_reply_enabled:
-            approved = await session.execute(
+            eligible_account = await session.execute(
                 select(func.count(XAccount.id)).where(
                     XAccount.owner_user_id == owner_user_id,
                     XAccount.status == "active",
-                    XAccount.x_written_approval.is_(True),
                     XAccount.automated_label_enabled.is_(True),
                 )
             )
-            if int(approved.scalar() or 0) == 0:
+            if int(eligible_account.scalar() or 0) == 0:
                 raise HTTPException(
                     status_code=400,
-                    detail="开启自动回复前必须绑定已录入 X 书面批准且启用自动账号标签的账号",
+                    detail="开启自动回复前必须绑定已启用自动账号标签的活跃账号",
                 )
         for name, enabled in scalar_controls.items():
             if enabled is not None:
@@ -1012,10 +1051,11 @@ async def update_account(
             raise HTTPException(status_code=404, detail="X 账号不存在")
         before = _serialize(account)
         updates = body.model_dump(exclude_none=True)
-        if updates.get("auto_reply_enabled") and (
-            not account.x_written_approval or not (updates.get("automated_label_enabled", account.automated_label_enabled))
+        if updates.get("auto_reply_enabled") and not updates.get(
+            "automated_label_enabled",
+            account.automated_label_enabled,
         ):
-            raise HTTPException(status_code=400, detail="自动回复需要 X 书面批准和自动账号标签")
+            raise HTTPException(status_code=400, detail="自动回复需要启用自动账号标签")
         _apply_values(account, updates)
         account.updated_at = _now_ms()
         await _audit(
@@ -1045,8 +1085,6 @@ async def save_approval_evidence(
             raise HTTPException(status_code=404, detail="X 账号不存在")
         account.x_written_approval = body.x_written_approval
         account.approval_reference = body.approval_reference
-        if not body.x_written_approval:
-            account.auto_reply_enabled = False
         account.updated_at = _now_ms()
         await _audit(
             session,
@@ -2198,6 +2236,215 @@ async def generate_reply_candidates(
         )
 
 
+@router.post("/posts/{post_id}/comments/prepare")
+async def prepare_manual_comment(
+    post_id: str,
+    body: XManualCommentRequest,
+    current_user: dict = Depends(require_x_operator),
+):
+    """Create an already-reviewed human-authored candidate for one explicit send.
+
+    The account is inferred from the dedicated logged-in browser.  The actual
+    write still goes through ``/reviews/{id}/publish`` so the live browser
+    check, Kill Switch, budgets, policy evidence and idempotency remain intact.
+    """
+
+    if not body.explicit_confirmation:
+        raise HTTPException(status_code=400, detail="必须明确确认目标帖子和评论文本")
+
+    owner_user_id = _owner(current_user)
+    async with get_session() as session:
+        post = await _owned_post(session, post_id, owner_user_id)
+        if post is None:
+            raise HTTPException(status_code=404, detail="帖子不存在")
+        controls = await _controls(session, owner_user_id)
+        if controls["global_kill_switch"]:
+            raise HTTPException(status_code=400, detail="Kill Switch 已开启，全部 X 写入已停止")
+        if not controls["write_enabled"]:
+            raise HTTPException(status_code=400, detail="请先开启全局 X 写入开关")
+
+        try:
+            async with _browser_reader(retain_page=True) as client:
+                identity = await client.get_current_identity()
+        except XBrowserError as exc:
+            _raise_x_browser_error(exc)
+        account, account_created = await _upsert_browser_identity_account(
+            session,
+            owner_user_id=owner_user_id,
+            identity=identity,
+        )
+        await _record_usage(
+            session,
+            owner_user_id=owner_user_id,
+            account_id=account.id,
+            endpoint="BROWSER /home identity before manual reply",
+            read_count=1,
+        )
+
+        final_text = canonical_text(body.text)
+        digest = content_hash(final_text)
+        risk = scan_content_risk(final_text)
+        if risk["risk_level"] == "high":
+            raise HTTPException(
+                status_code=400,
+                detail={"message": "评论文本触发高风险策略", "risk": risk},
+            )
+
+        existing_result = await session.execute(
+            select(XReplyCandidate, XReviewTask)
+            .join(
+                XReviewTask,
+                and_(
+                    XReviewTask.owner_user_id == XReplyCandidate.owner_user_id,
+                    XReviewTask.reply_candidate_id == XReplyCandidate.id,
+                ),
+            )
+            .where(
+                XReplyCandidate.owner_user_id == owner_user_id,
+                XReplyCandidate.account_id == account.id,
+                XReplyCandidate.source_post_id == post.id,
+                XReplyCandidate.content_hash == digest,
+                XReplyCandidate.model_version == "human-authored-browser-v1",
+                XReviewTask.review_status.in_(["approved", "published"]),
+            )
+            .order_by(XReplyCandidate.id.desc())
+            .limit(1)
+        )
+        existing_pair = existing_result.first()
+        if existing_pair is not None:
+            candidate, review = existing_pair
+            publish_result = await session.execute(
+                select(XPublishJob).where(
+                    XPublishJob.owner_user_id == owner_user_id,
+                    XPublishJob.reply_candidate_id == candidate.id,
+                    XPublishJob.review_task_id == review.id,
+                )
+            )
+            publish_job = publish_result.scalars().first()
+            already_published = bool(publish_job and publish_job.status == "succeeded")
+            return {
+                "success": True,
+                "reused": True,
+                "already_published": already_published,
+                "candidate": _serialize(candidate),
+                "review": _serialize(review),
+                "content_hash": digest,
+                "x_post_id": publish_job.x_post_id if already_published else "",
+                "x_post_url": _post_url(publish_job.x_post_id) if already_published else "",
+                "account": _serialize(account),
+                "identity": identity,
+                "browser": x_browser_profile_status(),
+            }
+
+        history_result = await session.execute(
+            select(XReplyCandidate.generated_text, XReplyCandidate.edited_text)
+            .where(
+                XReplyCandidate.owner_user_id == owner_user_id,
+                XReplyCandidate.account_id == account.id,
+                XReplyCandidate.review_status == "published",
+            )
+            .order_by(XReplyCandidate.created_at.desc())
+            .limit(1000)
+        )
+        historical = [str(edited or generated or "") for generated, edited in history_result.all()]
+        duplicate_score = max_duplicate_score(final_text, historical)
+        duplicate_threshold = float(controls.get("duplicate_threshold", 0.92))
+        if duplicate_score >= duplicate_threshold:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "评论文本与历史已发布回复过于相似",
+                    "duplicate_score": duplicate_score,
+                    "duplicate_threshold": duplicate_threshold,
+                },
+            )
+
+        interaction_result = await session.execute(
+            select(XInteraction).where(
+                XInteraction.owner_user_id == owner_user_id,
+                XInteraction.account_id == account.id,
+                XInteraction.interaction_post_id == post.x_post_id,
+            )
+        )
+        interaction = interaction_result.scalars().first()
+        now = _now_ms()
+        candidate = XReplyCandidate(
+            owner_user_id=owner_user_id,
+            account_id=account.id,
+            source_post_id=post.id,
+            interaction_id=interaction.id if interaction else None,
+            candidate_index=0,
+            generated_text=final_text,
+            style="manual",
+            risk_level=risk["risk_level"],
+            confidence=1.0,
+            requires_fact_check=False,
+            model_version="human-authored-browser-v1",
+            prompt_version="manual-browser-comment-v1",
+            content_hash=digest,
+            duplicate_score=duplicate_score,
+            generation_metadata_json=_json_text(
+                {
+                    "source": "x_post_detail_manual_comment",
+                    "target_post_id": post.x_post_id,
+                    "explicit_confirmation": True,
+                    "publish_transport": "browser",
+                    "browser_username": account.username,
+                    "input_risk": risk,
+                }
+            ),
+            review_status="approved",
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(candidate)
+        await session.flush()
+        review = XReviewTask(
+            owner_user_id=owner_user_id,
+            account_id=account.id,
+            reply_candidate_id=candidate.id,
+            interaction_id=interaction.id if interaction else None,
+            review_status="approved",
+            reviewed_by_user_id=owner_user_id,
+            final_text=final_text,
+            final_content_hash=digest,
+            review_reason="operator authored and explicitly confirmed for browser publishing",
+            reviewed_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(review)
+        await session.flush()
+        await _audit(
+            session,
+            owner_user_id=owner_user_id,
+            actor_user_id=owner_user_id,
+            action="manual_comment.prepared",
+            entity_type="x_review_task",
+            entity_id=str(review.id),
+            account_id=account.id,
+            after={
+                "candidate_id": candidate.id,
+                "target_post_id": post.x_post_id,
+                "content_hash": digest,
+                "publish_transport": "browser",
+                "browser_username": account.username,
+                "account_created": account_created,
+            },
+        )
+        return {
+            "success": True,
+            "reused": False,
+            "already_published": False,
+            "candidate": _serialize(candidate),
+            "review": _serialize(review),
+            "content_hash": digest,
+            "account": _serialize(account),
+            "identity": identity,
+            "browser": x_browser_profile_status(),
+        }
+
+
 async def _review_payload(
     session: AsyncSession,
     *,
@@ -2241,8 +2488,14 @@ async def _review_payload(
     policy_checks = [
         {"name": "candidate_not_blocked", "passed": bool(candidate and candidate.risk_level != "blocked")},
         {"name": "account_active", "passed": bool(account and account.status == "active")},
-        {"name": "account_write_enabled", "passed": bool(account and account.write_enabled)},
-        {"name": "api_reply_eligible", "passed": bool(eligibility.get("eligible"))},
+        {
+            "name": "browser_manual_publish",
+            "passed": bool(post and account and account.status == "active"),
+        },
+        {
+            "name": "auto_reply_eligible",
+            "passed": bool(eligibility.get("eligible")),
+        },
         {
             "name": "content_hash_current",
             "passed": bool(
@@ -2263,6 +2516,13 @@ async def _review_payload(
         "account": _serialize(account),
         "interaction": _serialize(interaction),
         "api_reply_eligible": bool(eligibility.get("eligible")),
+        "manual_browser_publish_eligible": bool(
+            post
+            and account
+            and account.status == "active"
+            and candidate
+            and candidate.risk_level != "blocked"
+        ),
         "eligibility": eligibility,
         "policy_checks": policy_checks,
         "manual_fallback": {
@@ -2560,7 +2820,10 @@ async def publish_review(
             raise HTTPException(status_code=404, detail="审核任务不存在")
         if review.reply_candidate_id != body.candidate_id:
             raise HTTPException(status_code=400, detail="candidate_id 与审核任务不匹配")
-        if body.publish_mode == "manual_review" and review.review_status != "approved":
+        if (
+            body.publish_mode == "manual_review"
+            and review.review_status not in {"approved", "published"}
+        ):
             raise HTTPException(status_code=409, detail="人工发布前必须完成逐条审核")
         candidate = await _owned_by_id(
             session,
@@ -2576,31 +2839,58 @@ async def publish_review(
         )
         if candidate is None or account is None or post is None:
             raise HTTPException(status_code=409, detail="候选、账号或目标帖子已不存在")
+        browser_manual_reply = body.publish_mode == "manual_review"
         final_text = review.final_text or candidate.edited_text or candidate.generated_text
         if content_hash(final_text) != body.content_hash:
             raise HTTPException(status_code=400, detail="文本已变化，原审批失效，请重新审核")
 
+        idempotency_key = build_idempotency_key(
+            owner_user_id=owner_user_id,
+            account_id=account.id,
+            target_post_id=post.x_post_id,
+            publish_mode=body.publish_mode,
+            approved_content_hash=body.content_hash,
+        )
+        existing_conditions = [
+            XPublishJob.owner_user_id == owner_user_id,
+            XPublishJob.account_id == account.id,
+        ]
+        if browser_manual_reply:
+            # 人工明确确认以“目标 + 最终文本哈希”为幂等边界：相同文本重放，
+            # 不同文本则为同一目标创建独立发布任务。
+            existing_conditions.append(XPublishJob.idempotency_key == idempotency_key)
+        else:
+            # 无人值守自动回复仍保持同一目标/互动最多一次。
+            existing_conditions.extend(
+                [
+                    XPublishJob.target_post_id == post.x_post_id,
+                    XPublishJob.publish_mode == body.publish_mode,
+                ]
+            )
         existing_result = await session.execute(
-            select(XPublishJob).where(
-                XPublishJob.owner_user_id == owner_user_id,
-                XPublishJob.account_id == account.id,
-                XPublishJob.target_post_id == post.x_post_id,
-                XPublishJob.publish_mode == body.publish_mode,
-            ).with_for_update()
+            select(XPublishJob).where(*existing_conditions).with_for_update()
         )
         existing = existing_result.scalars().first()
         retrying_existing_job = False
         if existing is not None:
-            same_approval = (
-                existing.reply_candidate_id == candidate.id
-                and existing.review_task_id == review.id
-                and existing.approval_content_hash == body.content_hash
+            same_content = (
+                existing.approval_content_hash == body.content_hash
                 and content_hash(existing.reply_text) == body.content_hash
+            )
+            same_approval = same_content and (
+                browser_manual_reply
+                or (
+                    existing.reply_candidate_id == candidate.id
+                    and existing.review_task_id == review.id
+                )
             )
             if not same_approval:
                 raise HTTPException(
                     status_code=409,
-                    detail="该目标已有绑定其他候选、审核或文本版本的发布任务",
+                    detail={
+                        "message": "该自动回复目标已有其他文本的发布任务",
+                        "publish_job": _serialize(existing),
+                    },
                 )
             if existing.status == "succeeded":
                 return {
@@ -2631,16 +2921,25 @@ async def publish_review(
                 raise HTTPException(status_code=400, detail="重试发布必须再次明确确认目标帖子和最终文本")
             retrying_existing_job = True
 
-        try:
-            access_token = await _account_access_token(session, account)
-        except ValueError as exc:
-            raise HTTPException(status_code=503, detail=str(exc))
-        if not access_token:
-            await session.commit()
-            raise HTTPException(status_code=503, detail="X user access token 未配置或已过期，账号写入已关闭")
+        access_token = ""
+        if not browser_manual_reply:
+            try:
+                access_token = await _account_access_token(session, account)
+            except ValueError as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+            if not access_token:
+                await session.commit()
+                raise HTTPException(status_code=503, detail="X user access token 未配置或已过期，账号写入已关闭")
 
         try:
-            async with _browser_reader() as client:
+            async with _browser_reader(retain_page=browser_manual_reply) as client:
+                if browser_manual_reply:
+                    identity = await client.get_current_identity()
+                    current_username = str(identity.get("username") or "").strip().lstrip("@").casefold()
+                    if current_username != str(account.username or "").casefold():
+                        raise XBrowserLoginRequired(
+                            "浏览器当前登录账号与评论确认时的账号不一致，请重新打开发送弹窗"
+                        )
                 target_payload = await client.lookup_post(post.x_post_id)
             users = included_users(target_payload)
             live_post = map_post(target_payload.get("data") or {}, users_by_id=users)
@@ -2671,6 +2970,10 @@ async def publish_review(
             account_username=account.username,
             account_post_ids=own_posts_result.scalars().all(),
         )
+        manual_public_reply = bool(
+            body.publish_mode == "manual_review"
+            and str(live_post.get("x_post_id") or live_post.get("id") or "") == post.x_post_id
+        )
         interaction = (
             await _owned_by_id(session, XInteraction, candidate.interaction_id, owner_user_id)
             if candidate.interaction_id
@@ -2691,10 +2994,13 @@ async def publish_review(
         if existing is not None:
             replied_statement = replied_statement.where(XPublishJob.id != existing.id)
         replied_result = await session.execute(replied_statement)
-        already_replied = int(replied_result.scalar() or 0) > 0 or bool(
-            interaction
-            and interaction.replied_publish_job_id
-            and (existing is None or interaction.replied_publish_job_id != existing.id)
+        already_replied = False if browser_manual_reply else (
+            int(replied_result.scalar() or 0) > 0
+            or bool(
+                interaction
+                and interaction.replied_publish_job_id
+                and (existing is None or interaction.replied_publish_job_id != existing.id)
+            )
         )
         controls = await _controls(session, owner_user_id)
         topic = (
@@ -2802,12 +3108,13 @@ async def publish_review(
                 write_enabled=bool(controls["write_enabled"]),
                 global_kill_switch=bool(controls["global_kill_switch"]),
                 require_human_review=bool(controls["require_human_review"]),
-                account_write_enabled=bool(account.write_enabled),
+                account_write_enabled=bool(account.write_enabled or browser_manual_reply),
                 account_status=account.status,
                 has_user_token=bool(access_token),
+                browser_authenticated=browser_manual_reply,
                 granted_scopes=scopes,
                 target_post_exists=True,
-                api_reply_eligible=bool(eligibility["eligible"]),
+                api_reply_eligible=bool(eligibility["eligible"] or manual_public_reply),
                 already_replied=already_replied,
                 user_opted_out=opted_out,
                 within_write_budget=budget.allowed,
@@ -2844,6 +3151,8 @@ async def publish_review(
                 allowed_auto_reply_intents=allowed_auto_reply_intents,
                 evidence={
                     "eligibility": eligibility,
+                    "manual_public_reply": manual_public_reply,
+                    "publish_transport": "browser" if browser_manual_reply else "official_api",
                     "opt_in": opt_in_evidence,
                     "target_post_id": post.x_post_id,
                     "intent": intent_evidence,
@@ -2868,6 +3177,8 @@ async def publish_review(
             evidence_json=_json_text(
                 {
                     "eligibility": eligibility,
+                    "manual_public_reply": manual_public_reply,
+                    "publish_transport": "browser" if browser_manual_reply else "official_api",
                     "opt_in": opt_in_evidence,
                     "write_budget": budget.to_dict(),
                     "automation_frequency": {
@@ -2926,20 +3237,16 @@ async def publish_review(
                 },
             )
 
-        idempotency_key = build_idempotency_key(
-            owner_user_id=owner_user_id,
-            account_id=account.id,
-            target_post_id=post.x_post_id,
-            publish_mode=body.publish_mode,
-            approved_content_hash=body.content_hash,
-        )
         if retrying_existing_job:
             publish_job = existing
             publish_job.policy_decision_id = policy_row.id
             publish_job.target_user_id = str(live_post.get("author_x_user_id") or "")
             publish_job.opt_in_evidence_json = _json_text(opt_in_evidence)
             publish_job.status = "running"
+            publish_job.scheduled_at = now
             publish_job.executed_at = now
+            publish_job.lease_owner = ""
+            publish_job.lease_expires_at = 0
             publish_job.error_code = ""
             publish_job.error_message = ""
             publish_job.updated_at = now
@@ -2949,7 +3256,11 @@ async def publish_review(
                 account_id=account.id,
                 reply_candidate_id=candidate.id,
                 review_task_id=review.id,
-                interaction_id=interaction.id if interaction else None,
+                interaction_id=(
+                    None
+                    if browser_manual_reply
+                    else (interaction.id if interaction else None)
+                ),
                 policy_decision_id=policy_row.id,
                 target_post_id=post.x_post_id,
                 target_user_id=str(live_post.get("author_x_user_id") or ""),
@@ -2984,23 +3295,50 @@ async def publish_review(
                 account_id=account.id,
                 after={"attempt_no": attempt_no, "policy_decision_id": policy_row.id},
             )
+        publish_endpoint = (
+            "BROWSER POST /i/web/status/{id} reply"
+            if browser_manual_reply
+            else "POST /2/tweets"
+        )
         try:
-            async with XWriteApiClient(
-                user_access_token=access_token,
-                base_url=x_config.X_WRITE_API_BASE_URL,
-                response_observer=_response_observer(
-                    session,
-                    owner_user_id=owner_user_id,
-                    account_id=account.id,
-                ),
-            ) as client:
-                response = await XPublisher(client).publish_reply(
-                    text=final_text,
-                    target_post_id=post.x_post_id,
-                    idempotency_key=idempotency_key,
-                    policy=policy,
-                )
+            if browser_manual_reply:
+                try:
+                    async with _browser_reader(retain_page=True) as client:
+                        identity = await client.get_current_identity()
+                        current_username = str(identity.get("username") or "").strip().lstrip("@").casefold()
+                        if current_username != str(account.username or "").casefold():
+                            raise XBrowserLoginRequired(
+                                "浏览器当前登录账号与评论确认时的账号不一致，请重新打开发送弹窗"
+                            )
+                        response = await client.publish_reply(
+                            text=final_text,
+                            target_post_id=post.x_post_id,
+                        )
+                except XBrowserError as exc:
+                    raise XApiError(
+                        str(exc),
+                        status_code=502,
+                        error_code=exc.error_code,
+                        retryable=exc.retryable,
+                    ) from exc
+            else:
+                async with XWriteApiClient(
+                    user_access_token=access_token,
+                    base_url=x_config.X_WRITE_API_BASE_URL,
+                    response_observer=_response_observer(
+                        session,
+                        owner_user_id=owner_user_id,
+                        account_id=account.id,
+                    ),
+                ) as client:
+                    response = await XPublisher(client).publish_reply(
+                        text=final_text,
+                        target_post_id=post.x_post_id,
+                        idempotency_key=idempotency_key,
+                        policy=policy,
+                    )
             created = response.get("data") or {}
+            response_meta = response.get("meta") or {}
             x_post_id = str(created.get("id") or "")
             publish_job.status = "succeeded"
             publish_job.x_post_id = x_post_id
@@ -3014,8 +3352,14 @@ async def publish_review(
                 attempt_no=attempt_no,
                 success=True,
                 x_post_id=x_post_id,
-                http_status=201,
-                response_metadata_json=_json_text({"id": x_post_id}),
+                http_status=int(response_meta.get("http_status") or (200 if browser_manual_reply else 201)),
+                response_metadata_json=_json_text(
+                    {
+                        "id": x_post_id,
+                        "publish_transport": "browser" if browser_manual_reply else "official_api",
+                        "confirmation": response_meta.get("confirmation") or "",
+                    }
+                ),
                 request_id=request.headers.get("x-request-id", ""),
                 attempted_at=_now_ms(),
                 created_at=_now_ms(),
@@ -3035,7 +3379,7 @@ async def publish_review(
                 session,
                 owner_user_id=owner_user_id,
                 account_id=account.id,
-                endpoint="POST /2/tweets",
+                endpoint=publish_endpoint,
                 write_count=1,
             )
             await _audit(
@@ -3046,7 +3390,12 @@ async def publish_review(
                 entity_type="x_publish_job",
                 entity_id=str(publish_job.id),
                 account_id=account.id,
-                after={"x_post_id": x_post_id, "target_post_id": post.x_post_id},
+                after={
+                    "x_post_id": x_post_id,
+                    "target_post_id": post.x_post_id,
+                    "publish_transport": "browser" if browser_manual_reply else "official_api",
+                    "browser_username": account.username if browser_manual_reply else "",
+                },
                 request_id=request.headers.get("x-request-id", ""),
                 ip_address=request.client.host if request.client else "",
             )
@@ -3092,7 +3441,7 @@ async def publish_review(
                 session,
                 owner_user_id=owner_user_id,
                 account_id=account.id,
-                endpoint="POST /2/tweets",
+                endpoint=publish_endpoint,
                 success=False,
             )
             await _audit(
@@ -3108,6 +3457,7 @@ async def publish_review(
                     "attempt_no": attempt_no,
                     "error_code": exc.error_code,
                     "retryable": exc.retryable,
+                    "publish_transport": "browser" if browser_manual_reply else "official_api",
                 },
             )
             await session.commit()

@@ -190,6 +190,7 @@ class PublicationContext:
     account_write_enabled: bool = False
     account_status: str = "disabled"
     has_user_token: bool = False
+    browser_authenticated: bool = False
     granted_scopes: Sequence[str] = field(default_factory=list)
     target_post_exists: bool = False
     api_reply_eligible: bool = False
@@ -247,8 +248,16 @@ def evaluate_publication_policy(context: PublicationContext) -> PolicyEvaluation
         ("global_write_enabled", context.write_enabled, "global write control must be enabled"),
         ("account_write_enabled", context.account_write_enabled, "account write control must be enabled"),
         ("account_active", context.account_status == "active", "account must be active"),
-        ("user_token_present", context.has_user_token, "user-context access token is required"),
-        ("tweet_write_scope", "tweet.write" in scopes, "OAuth scope tweet.write is required"),
+        (
+            "write_auth_present",
+            context.has_user_token or context.browser_authenticated,
+            "an OAuth user token or authenticated operator browser is required",
+        ),
+        (
+            "write_permission_present",
+            "tweet.write" in scopes or context.browser_authenticated,
+            "OAuth tweet.write scope or an authenticated operator browser is required",
+        ),
         ("target_exists", context.target_post_exists, "target Post must still exist"),
         ("api_reply_eligible", context.api_reply_eligible, "target must satisfy X reply eligibility"),
         ("not_opted_out", not context.user_opted_out, "opted-out users cannot be contacted"),
@@ -281,7 +290,6 @@ def evaluate_publication_policy(context: PublicationContext) -> PolicyEvaluation
         }
         intent_allowed = bool(allowed_intents & observed_intents)
         auto_checks = [
-            ("x_written_approval", context.x_written_approval, "written X approval is mandatory for AI auto reply"),
             ("account_auto_reply_enabled", context.auto_reply_enabled, "account auto-reply switch must be enabled"),
             ("global_auto_reply_enabled", context.global_auto_reply_enabled, "global auto-reply switch must be enabled"),
             ("automated_label_enabled", context.automated_label_enabled, "automated account disclosure must be enabled"),

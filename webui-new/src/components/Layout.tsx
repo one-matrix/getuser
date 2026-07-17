@@ -79,6 +79,7 @@ const Layout: React.FC<LayoutProps> = ({ children, isDark, onThemeChange }) => {
     { key: '/mine', icon: <CrownOutlined />, label: '我的' },
     { key: '/settings', icon: <SettingOutlined />, label: '设置' },
   ];
+  const selectedMenuKey = location.pathname.startsWith('/x/') ? '/x' : location.pathname;
 
   return (
     <AntLayout style={{ minHeight: '100vh' }}>
@@ -116,7 +117,7 @@ const Layout: React.FC<LayoutProps> = ({ children, isDark, onThemeChange }) => {
         </div>
         <Menu
           mode="inline"
-          selectedKeys={[location.pathname]}
+          selectedKeys={[selectedMenuKey]}
           items={menuItems}
           onClick={({ key }) => {
             navigate(key);

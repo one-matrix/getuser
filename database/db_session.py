@@ -87,6 +87,8 @@ async def create_tables(db_type: str = None):
             await conn.run_sync(Base.metadata.create_all)
         # 给已有业务表补充 owner_user_id 字段(数据隔离)
         await _migrate_owner_user_id(engine, db_type)
+        # 人工明确确认的评论允许对同一目标发布不同文本；内容哈希幂等键仍防止重复提交。
+        await _migrate_x_publish_job_constraints(engine, db_type)
 
 
 async def _migrate_owner_user_id(engine, db_type: str):
@@ -149,6 +151,63 @@ async def _migrate_owner_user_id(engine, db_type: str):
                 )
             except Exception:
                 pass
+
+
+async def _migrate_x_publish_job_constraints(engine, db_type: str):
+    """移除旧的“目标帖子 + 发布模式”唯一限制，改为普通查询索引。
+
+    `owner_user_id + idempotency_key` 唯一约束仍保留，因此同一人工评论文本
+    的重复点击仍是幂等请求；不同文本可各自生成独立、可审计的发布任务。
+    """
+    constraint_name = "uq_x_publish_jobs_owner_account_target_mode"
+    index_name = "ix_x_publish_jobs_owner_account_target_mode"
+    index_columns = "owner_user_id, account_id, target_post_id, publish_mode"
+
+    if db_type == "postgres":
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    f"ALTER TABLE x_publish_jobs "
+                    f"DROP CONSTRAINT IF EXISTS {constraint_name}"
+                )
+            )
+            await conn.execute(
+                text(
+                    "UPDATE x_publish_jobs SET interaction_id = NULL "
+                    "WHERE publish_mode = 'manual_review' AND interaction_id IS NOT NULL"
+                )
+            )
+            await conn.execute(
+                text(
+                    f"CREATE INDEX IF NOT EXISTS {index_name} "
+                    f"ON x_publish_jobs ({index_columns})"
+                )
+            )
+    elif db_type in ("mysql", "db"):
+        async with engine.begin() as conn:
+            try:
+                await conn.execute(
+                    text(f"ALTER TABLE x_publish_jobs DROP INDEX {constraint_name}")
+                )
+            except Exception:
+                pass
+            await conn.execute(
+                text(
+                    "UPDATE x_publish_jobs SET interaction_id = NULL "
+                    "WHERE publish_mode = 'manual_review' AND interaction_id IS NOT NULL"
+                )
+            )
+            try:
+                await conn.execute(
+                    text(
+                        f"CREATE INDEX {index_name} "
+                        f"ON x_publish_jobs ({index_columns})"
+                    )
+                )
+            except Exception:
+                pass
+    # SQLite 新建数据库会直接使用模型中的普通索引。SQLite 无法直接删除
+    # UniqueConstraint 生成的 autoindex；旧 SQLite 数据库需由正式迁移工具重建表。
 
 
 @asynccontextmanager

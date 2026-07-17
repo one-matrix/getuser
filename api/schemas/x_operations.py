@@ -105,6 +105,19 @@ class XReplyCandidatesRequest(BaseModel):
         return value
 
 
+class XManualCommentRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=280)
+    explicit_confirmation: bool
+
+    @field_validator("text")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        normalized = " ".join(value.strip().split())
+        if not normalized:
+            raise ValueError("comment text cannot be empty")
+        return normalized
+
+
 class XReviewApprovalRequest(BaseModel):
     candidate_id: int = Field(gt=0)
     final_text: str = Field(min_length=1, max_length=280)

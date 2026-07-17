@@ -17,6 +17,7 @@ export interface XPublicMetrics {
   retweet_count?: number;
   quote_count?: number;
   impression_count?: number;
+  view_count?: number;
 }
 
 export interface XTopic {
@@ -125,6 +126,10 @@ export interface XPolicyCheck {
 export interface XThreadAnalysis {
   id?: string | number;
   root_post_id?: string;
+  status?: string;
+  input_content_hash?: string;
+  schema_version?: string;
+  error_message?: string;
   summary?: string;
   viewpoints?: Array<string | { label?: string; summary?: string; count?: number }>;
   core_viewpoints?: Array<string | { label?: string; summary?: string; count?: number }>;
@@ -151,7 +156,27 @@ export interface XThreadNode extends XPost {
   children?: XThreadNode[];
 }
 
+export interface XConversationMeta {
+  id?: string | number;
+  root_post_id?: string;
+  x_conversation_id?: string;
+  language?: string;
+  status?: string;
+  sample_strategy?: string;
+  sample_limit?: number;
+  total_post_count?: number;
+  sampled_post_count?: number;
+  max_depth?: number;
+  newest_post_at?: string | number;
+  last_collected_at?: string | number;
+  next_refresh_at?: string | number;
+  last_error?: string;
+  created_at?: string | number;
+  updated_at?: string | number;
+}
+
 export interface XConversation {
+  conversation?: XConversationMeta;
   root_post?: XPost;
   posts?: XPost[];
   replies?: XPost[];
@@ -184,6 +209,7 @@ export interface XReviewTask {
   risk_level?: string;
   requires_fact_check?: boolean;
   api_reply_eligible?: boolean;
+  manual_browser_publish_eligible?: boolean;
   eligibility_reason?: string;
   eligibility?: {
     eligible?: boolean;
@@ -221,6 +247,7 @@ export interface XAutomationStatus {
   global_kill_switch: boolean;
   require_human_review: boolean;
   effective_write_allowed?: boolean;
+  effective_browser_write_allowed?: boolean;
   credentials?: XCredentialStatus;
   reasons?: string[];
   daily_write_limit?: number;
@@ -391,7 +418,7 @@ export const collectXTopicPosts = (
 export const getXPosts = (params?: XPostQuery): Promise<XListResponse<XPost>> =>
   request.get('/x/posts', { params });
 
-export const getXPost = (postId: string | number): Promise<{ post: XPost; conversation?: Record<string, unknown> }> =>
+export const getXPost = (postId: string | number): Promise<{ post: XPost; conversation?: XConversationMeta }> =>
   request.get(`/x/posts/${postId}`);
 
 export const collectXThread = (postId: string | number): Promise<XConversation & { success: boolean; message?: string }> =>
@@ -418,6 +445,26 @@ export const generateXReplyCandidates = (
   fallback_used?: boolean;
 }> =>
   request.post(`/x/posts/${postId}/reply-candidates`, data, X_MODEL_REQUEST);
+
+export interface XPreparedComment {
+  success: boolean;
+  reused?: boolean;
+  already_published?: boolean;
+  candidate: XReplyCandidate;
+  review: XReviewTask;
+  content_hash: string;
+  x_post_id?: string;
+  x_post_url?: string;
+  account?: XAccount;
+  identity?: { id?: string; username?: string; name?: string; source?: string };
+  browser?: XBrowserStatus;
+}
+
+export const prepareXPostComment = (
+  postId: string | number,
+  data: { text: string; explicit_confirmation: true },
+): Promise<XPreparedComment> =>
+  request.post(`/x/posts/${postId}/comments/prepare`, data, X_WRITE_REQUEST);
 
 export const getXReviews = (params?: XReviewQuery): Promise<XListResponse<XReviewTask>> =>
   request.get('/x/reviews', { params });
@@ -464,6 +511,44 @@ export const publishXReview = (
   },
 ): Promise<{ success: boolean; message?: string; status?: string; x_post_id?: string }> =>
   request.post(`/x/reviews/${reviewId}/publish`, data, X_WRITE_REQUEST);
+
+export const sendXPostComment = async (
+  postId: string | number,
+  data: { text: string; explicit_confirmation: true },
+): Promise<{
+  success: boolean;
+  message?: string;
+  x_post_id?: string;
+  x_post_url?: string;
+  prepared: XPreparedComment;
+}> => {
+  const prepared = await prepareXPostComment(postId, data);
+  if (prepared.already_published) {
+    return {
+      success: true,
+      message: '该评论已发布',
+      x_post_id: prepared.x_post_id,
+      x_post_url: prepared.x_post_url,
+      prepared,
+    };
+  }
+  if (prepared.review.id == null || prepared.candidate.id == null) {
+    throw new Error('评论审核记录创建失败');
+  }
+  const published = await publishXReview(prepared.review.id, {
+    candidate_id: prepared.candidate.id,
+    content_hash: prepared.content_hash,
+    explicit_confirmation: true,
+    publish_mode: 'manual_review',
+  });
+  return {
+    ...published,
+    x_post_url: published.x_post_id
+      ? `https://x.com/i/web/status/${published.x_post_id}`
+      : undefined,
+    prepared,
+  };
+};
 
 export const getXAutomationStatus = (): Promise<XAutomationStatus> =>
   request.get('/x/automation/status');

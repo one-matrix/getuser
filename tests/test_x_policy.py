@@ -72,6 +72,21 @@ def test_manual_publish_requires_explicit_confirmation_and_exact_hash():
     assert allowed.decision == "allowed"
 
 
+def test_manual_browser_publish_does_not_require_oauth_token_or_scope():
+    allowed = evaluate_publication_policy(
+        _publishable_context(
+            has_user_token=False,
+            browser_authenticated=True,
+            granted_scopes=[],
+        )
+    )
+
+    assert allowed.allowed is True
+    rules = {item["rule"]: item["passed"] for item in allowed.rule_results}
+    assert rules["write_auth_present"] is True
+    assert rules["write_permission_present"] is True
+
+
 def test_kill_switch_and_write_disabled_block_publication():
     result = evaluate_publication_policy(
         _publishable_context(global_kill_switch=True, write_enabled=False)
@@ -96,7 +111,7 @@ def test_duplicate_and_operational_scope_controls_block_publication():
     assert "paused keyword matched" in result.blocked_reason
 
 
-def test_auto_reply_requires_written_approval_and_user_initiated_evidence():
+def test_auto_reply_does_not_require_written_approval_but_requires_user_evidence():
     denied = evaluate_publication_policy(
         _publishable_context(
             publish_mode="auto_reply",
@@ -111,7 +126,7 @@ def test_auto_reply_requires_written_approval_and_user_initiated_evidence():
         )
     )
     failed = {item["rule"] for item in denied.rule_results if not item["passed"]}
-    assert "x_written_approval" in failed
+    assert "x_written_approval" not in failed
     assert "user_initiated" in failed
 
     allowed = evaluate_publication_policy(
@@ -119,7 +134,7 @@ def test_auto_reply_requires_written_approval_and_user_initiated_evidence():
             publish_mode="auto_reply",
             approved_content_hash="",
             explicit_confirmation=False,
-            x_written_approval=True,
+            x_written_approval=False,
             auto_reply_enabled=True,
             global_auto_reply_enabled=True,
             automated_label_enabled=True,

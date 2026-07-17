@@ -1,4 +1,4 @@
-"""Deterministic browser reader for X public pages and authenticated timelines."""
+"""Deterministic browser client for X reads and explicit operator writes."""
 
 from __future__ import annotations
 
@@ -118,7 +118,7 @@ _EXTRACT_IDENTITY_SCRIPT = r"""
 
 
 class XBrowserClient:
-    """Read X through a logged-in browser without calling X API read endpoints."""
+    """Use a logged-in X browser without calling X API read endpoints."""
 
     def __init__(
         self,
@@ -282,6 +282,265 @@ class XBrowserClient:
             "source": "browser_profile",
         }
 
+    async def publish_reply(self, *, target_post_id: str, text: str) -> Dict[str, Any]:
+        """Publish one explicitly confirmed reply with the logged-in browser.
+
+        This method intentionally uses the visible X composer instead of an X
+        API token.  It never attempts to bypass a login or account challenge,
+        and it only clicks the reply action inside the exact target article.
+        """
+
+        post_id = str(target_post_id).strip()
+        final_text = " ".join(str(text or "").strip().split())
+        if not post_id.isdigit():
+            raise ValueError("target_post_id must be a numeric X Post ID")
+        if not final_text:
+            raise ValueError("reply text cannot be empty")
+        if len(final_text) > 280:
+            raise ValueError("reply text exceeds 280 characters")
+        if not hasattr(self.page, "locator"):
+            raise XBrowserStructureChanged("X browser page does not support interactive reply controls")
+
+        url = f"{x_config.X_BROWSER_BASE_URL}/i/web/status/{post_id}"
+        await self._goto(url, require_login=True)
+        await self._ensure_posts_rendered(require_login=True)
+
+        article = self.page.locator(
+            f'article[data-testid="tweet"]:has(a[href*="/status/{post_id}"])'
+        ).first
+        if await article.count() == 0:
+            raise XBrowserStructureChanged(f"X target post {post_id} is not visible in the browser")
+        reply_button = article.locator('[data-testid="reply"]').first
+        if await reply_button.count() == 0:
+            raise XBrowserStructureChanged("X target post reply button was not found")
+
+        async def visible_locator(container: Any, selector: str) -> Any:
+            try:
+                candidates = container.locator(selector)
+                count = await candidates.count()
+                for index in range(count - 1, -1, -1):
+                    candidate = candidates.nth(index) if hasattr(candidates, "nth") else candidates.last
+                    if await candidate.is_visible():
+                        return candidate
+            except Exception:
+                pass
+            return None
+
+        async def wait_visible_locator(
+            container: Any,
+            selector: str,
+            timeout_ms: int,
+        ) -> Any:
+            deadline = asyncio.get_running_loop().time() + max(0, timeout_ms) / 1000
+            while True:
+                candidate = await visible_locator(container, selector)
+                if candidate is not None:
+                    return candidate
+                if asyncio.get_running_loop().time() >= deadline:
+                    return None
+                await asyncio.sleep(0.1)
+
+        target_dialog_selector = f'div[role="dialog"]:has(a[href*="/status/{post_id}"])'
+        target_dialog = await visible_locator(self.page, target_dialog_selector)
+        dialog = target_dialog
+        composer = None
+        submit = None
+        composer_surface = "dialog"
+
+        if target_dialog is not None:
+            composer = await visible_locator(
+                target_dialog,
+                '[data-testid="tweetTextarea_0"][contenteditable="true"]',
+            )
+            submit = await visible_locator(
+                target_dialog,
+                '[data-testid="tweetButton"], [data-testid="tweetButtonInline"]',
+            )
+        else:
+            # X permalink pages expose a faster inline "Post your reply"
+            # editor. Activate the visible prompt first, then resolve the
+            # editable textbox inside that exact composer. Looking up the
+            # textbox globally can select another dormant X composer.
+            inline_scope = await wait_visible_locator(
+                self.page,
+                '[data-testid="tweetTextarea_0_label"]:has-text("Post your reply")',
+                x_config.X_BROWSER_INLINE_COMPOSER_WAIT_MS,
+            )
+            if inline_scope is not None:
+                inline_prompt = await visible_locator(
+                    inline_scope,
+                    '.public-DraftEditorPlaceholder-inner:text-is("Post your reply")',
+                )
+                try:
+                    focus_target = inline_prompt if inline_prompt is not None else inline_scope
+                    await focus_target.click(timeout=3_000)
+                except Exception:
+                    # The editor can already be focused and remove its
+                    # placeholder between discovery and the click.
+                    pass
+                inline_editor = inline_scope.locator(
+                    '[data-testid="tweetTextarea_0"][contenteditable="true"], '
+                    '[role="textbox"][contenteditable="true"][aria-label="Post text"]'
+                ).last
+                try:
+                    await inline_editor.wait_for(
+                        state="visible",
+                        timeout=x_config.X_BROWSER_INLINE_COMPOSER_WAIT_MS,
+                    )
+                except Exception:
+                    inline_editor = None
+                inline_composer = inline_editor
+            else:
+                # Compatibility fallback for X variants that omit the label
+                # wrapper while still exposing an inline editable textbox.
+                inline_composer = await visible_locator(
+                    self.page,
+                    '[data-testid="tweetTextarea_0"][contenteditable="true"], '
+                    '[role="textbox"][contenteditable="true"][aria-label="Post text"]',
+                )
+            inline_submit = await visible_locator(
+                self.page,
+                '[data-testid="tweetButtonInline"]',
+            )
+            if inline_composer is not None and inline_submit is not None:
+                composer = inline_composer
+                submit = inline_submit
+                composer_surface = "inline"
+
+        if composer is None:
+            try:
+                await reply_button.click(timeout=5_000)
+            except Exception as exc:
+                # X can finish opening the modal while Playwright is still
+                # reporting the underlying page mask as a pointer interceptor.
+                target_dialog = await visible_locator(self.page, target_dialog_selector)
+                generic_dialog = await visible_locator(self.page, 'div[role="dialog"]')
+                if target_dialog is None and generic_dialog is None:
+                    raise XBrowserStructureChanged(
+                        "X reply button is blocked by another page overlay; close the open X dialog and retry"
+                    ) from exc
+            dialog_candidate = self.page.locator('div[role="dialog"]').last
+            try:
+                await dialog_candidate.wait_for(state="visible", timeout=8_000)
+            except Exception as exc:
+                raise XBrowserStructureChanged("X reply dialog did not open") from exc
+            dialog = (
+                await visible_locator(self.page, target_dialog_selector)
+                or await visible_locator(self.page, 'div[role="dialog"]')
+            )
+            if dialog is None:
+                raise XBrowserStructureChanged("X reply dialog did not remain visible")
+            composer = await visible_locator(
+                dialog,
+                '[data-testid="tweetTextarea_0"][contenteditable="true"]',
+            )
+            submit = await visible_locator(
+                dialog,
+                '[data-testid="tweetButton"], [data-testid="tweetButtonInline"]',
+            )
+
+        if composer is None:
+            raise XBrowserStructureChanged("X reply composer was not found in the active editor")
+        try:
+            await composer.wait_for(state="visible", timeout=8_000)
+            await composer.fill(final_text, timeout=8_000)
+        except Exception as exc:
+            await self._raise_page_state(require_login=True)
+            raise XBrowserStructureChanged("X reply composer did not become editable") from exc
+
+        if submit is None:
+            raise XBrowserStructureChanged("X reply submit button was not found")
+        try:
+            await submit.wait_for(state="visible", timeout=5_000)
+            if hasattr(submit, "is_enabled") and not await submit.is_enabled():
+                raise XBrowserStructureChanged("X reply submit button is disabled")
+        except XBrowserStructureChanged:
+            raise
+        except Exception as exc:
+            raise XBrowserStructureChanged("X reply submit button is not ready") from exc
+
+        captured_responses: List[Any] = []
+
+        def capture_create_tweet(response: Any) -> None:
+            request = getattr(response, "request", None)
+            method = str(getattr(request, "method", "") or "").upper()
+            response_url = str(getattr(response, "url", "") or "")
+            if method == "POST" and "CreateTweet" in response_url:
+                captured_responses.append(response)
+
+        can_observe_responses = hasattr(self.page, "on")
+        if can_observe_responses:
+            self.page.on("response", capture_create_tweet)
+        try:
+            await submit.click(timeout=10_000)
+            toast_text = ""
+            toast_href = ""
+            composer_closed = False
+            for _ in range(24):
+                if captured_responses:
+                    break
+                toast = self.page.locator('[data-testid="toast"]').last
+                try:
+                    if await toast.count() and await toast.is_visible():
+                        toast_text = str(await toast.inner_text() or "")
+                        toast_link = toast.locator('a[href*="/status/"]').last
+                        if await toast_link.count():
+                            toast_href = str(await toast_link.get_attribute("href") or "")
+                        break
+                except Exception:
+                    pass
+                try:
+                    composer_closed = not await composer.is_visible()
+                except Exception:
+                    composer_closed = False
+                if composer_closed:
+                    break
+                await asyncio.sleep(0.25)
+
+            response_status = 0
+            response_payload: Any = {}
+            if captured_responses:
+                response = captured_responses[-1]
+                response_status = int(getattr(response, "status", 0) or 0)
+                try:
+                    response_payload = await response.json()
+                except Exception:
+                    response_payload = {}
+                if response_status >= 400:
+                    raise XBrowserStructureChanged(
+                        f"X browser reply request failed with HTTP {response_status}"
+                    )
+
+            created_post_id = _created_post_id(response_payload)
+            if not created_post_id:
+                created_post_id = _post_id_from_href(toast_href)
+            success_text = bool(
+                re.search(r"(?:sent|posted|published|已发送|已发布|发送成功)", toast_text, re.I)
+            )
+            if not (captured_responses or created_post_id or success_text or composer_closed):
+                raise XBrowserStructureChanged(
+                    "X reply was submitted but the browser did not expose a success confirmation; inspect the open browser before retrying"
+                )
+            return {
+                "data": {"id": created_post_id, "text": final_text},
+                "meta": {
+                    "source": "browser",
+                    "target_post_id": post_id,
+                    "composer_surface": composer_surface,
+                    "http_status": response_status,
+                    "confirmation": (
+                        "create_tweet_response"
+                        if captured_responses
+                        else "toast"
+                        if (created_post_id or success_text)
+                        else "composer_closed"
+                    ),
+                },
+            }
+        finally:
+            if can_observe_responses and hasattr(self.page, "remove_listener"):
+                self.page.remove_listener("response", capture_create_tweet)
+
     async def _collect_posts(
         self,
         url: str,
@@ -290,6 +549,7 @@ class XBrowserClient:
         require_login: bool,
     ) -> List[Dict[str, Any]]:
         await self._goto(url, require_login=require_login)
+        await self._ensure_posts_rendered(require_login=require_login)
         collected: Dict[str, Dict[str, Any]] = {}
         stagnant_rounds = 0
         for _ in range(max(1, x_config.X_BROWSER_MAX_SCROLLS)):
@@ -321,8 +581,54 @@ class XBrowserClient:
             ][:max_total]
         if not posts:
             await self._raise_page_state(require_login=require_login)
-            raise XBrowserStructureChanged("X page returned no extractable posts")
+            raise XBrowserStructureChanged(
+                "X post timeline did not render after waiting, retrying, and reloading once"
+            )
         return posts
+
+    async def _ensure_posts_rendered(self, *, require_login: bool) -> None:
+        """Recover once from X's lazy timeline and transient Retry screen."""
+
+        if not hasattr(self.page, "locator"):
+            return
+
+        articles = self.page.locator('article[data-testid="tweet"]')
+
+        async def wait_for_article(timeout_ms: int) -> bool:
+            try:
+                await articles.first.wait_for(state="visible", timeout=timeout_ms)
+                return True
+            except Exception:
+                return False
+
+        if await wait_for_article(x_config.X_BROWSER_POST_RENDER_WAIT_MS):
+            return
+
+        await self._raise_page_state(require_login=require_login)
+        retry_text = re.compile(
+            r"^\s*(?:Retry|Try again|Reload|重试|再试一次|重新加载)\s*$",
+            flags=re.I,
+        )
+        try:
+            retry_button = self.page.locator("button").filter(has_text=retry_text)
+            if await retry_button.count():
+                await retry_button.first.click(timeout=3_000)
+                if await wait_for_article(x_config.X_BROWSER_POST_RELOAD_WAIT_MS):
+                    return
+        except Exception:
+            # X changes its transient error button frequently; the bounded reload
+            # below is the deterministic recovery path when it cannot be clicked.
+            pass
+
+        try:
+            await self.page.reload(wait_until="domcontentloaded")
+            await asyncio.sleep(x_config.X_BROWSER_PAGE_SETTLE_MS / 1000)
+            await self._raise_page_state(require_login=require_login)
+            await wait_for_article(x_config.X_BROWSER_POST_RELOAD_WAIT_MS)
+        except (XBrowserChallengeRequired, XBrowserLoginRequired):
+            raise
+        except Exception:
+            return
 
     async def _goto(self, url: str, *, require_login: bool) -> None:
         try:
@@ -341,7 +647,7 @@ class XBrowserClient:
             raise XBrowserChallengeRequired(
                 "X displayed a security challenge; complete it manually in the browser before retrying"
             )
-        if require_login and "/i/flow/login" in lowered:
+        if "/i/flow/login" in lowered:
             raise XBrowserLoginRequired(
                 "X browser profile is not logged in; open the configured Chrome profile and sign in"
             )
@@ -492,6 +798,36 @@ def _parse_count(value: Any) -> int:
         "亿": 100_000_000,
     }.get(match.group(2).upper(), 1)
     return int(number * multiplier)
+
+
+def _created_post_id(payload: Any) -> str:
+    """Extract the created tweet ID from X's browser CreateTweet response."""
+
+    if isinstance(payload, Mapping):
+        for key in ("rest_id", "id_str"):
+            value = str(payload.get(key) or "")
+            if value.isdigit():
+                return value
+        for key in ("tweet_results", "create_tweet", "result", "data"):
+            if key in payload:
+                found = _created_post_id(payload[key])
+                if found:
+                    return found
+        for value in payload.values():
+            found = _created_post_id(value)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for value in payload:
+            found = _created_post_id(value)
+            if found:
+                return found
+    return ""
+
+
+def _post_id_from_href(href: str) -> str:
+    match = _STATUS_RE.search(str(href or ""))
+    return match.group(2) if match else ""
 
 
 def _username_from_href(href: str) -> str:

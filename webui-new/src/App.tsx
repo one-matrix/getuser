@@ -11,6 +11,7 @@ import Settings from './pages/Settings';
 import Login from './pages/Login';
 import Mine from './pages/Mine';
 import XOperations from './pages/XOperations';
+import XPostDetail from './pages/XPostDetail';
 
 function AnimatedRoutes() {
   const location = useLocation();
@@ -21,6 +22,7 @@ function AnimatedRoutes() {
       <Route path="/leads" element={<LeadList />} />
       <Route path="/tasks" element={<TaskManager />} />
       <Route path="/x" element={<XOperations />} />
+      <Route path="/x/posts/:postId" element={<XPostDetail />} />
       {/* 兼容旧路由:自动重定向到新位置 */}
       <Route path="/cookies" element={<Navigate to="/mine" replace />} />
       <Route path="/business" element={<Navigate to="/mine" replace />} />

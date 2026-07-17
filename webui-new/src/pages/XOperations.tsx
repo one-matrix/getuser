@@ -56,6 +56,7 @@ import {
   WarningOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { authStorage } from '../api/auth';
 import {
   analyzeXConversation,
@@ -82,7 +83,6 @@ import {
   refreshXTopics,
   regenerateXReview,
   rejectXReview,
-  saveXAccountApprovalEvidence,
   startXOAuth,
   syncXBrowserAccount,
   testXAccount,
@@ -116,6 +116,7 @@ const SAFE_AUTOMATION_DEFAULTS: XAutomationStatus = {
   global_kill_switch: true,
   require_human_review: true,
   effective_write_allowed: false,
+  effective_browser_write_allowed: false,
   reasons: ['尚未读取后端安全状态，前端按最严格模式处理'],
 };
 
@@ -579,6 +580,8 @@ function ThreadTreeList({ nodes, depth = 0 }: { nodes: XThreadNode[]; depth?: nu
 }
 
 export default function XOperations() {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const {
     token: {
       colorBgLayout,
@@ -597,7 +600,12 @@ export default function XOperations() {
   const canOperate = currentUser?.role !== 'viewer';
   const isAdmin = currentUser?.role === 'admin';
 
-  const [activeTab, setActiveTab] = useState('radar');
+  const requestedTab = searchParams.get('tab');
+  const [activeTab, setActiveTab] = useState(
+    ['radar', 'posts', 'interactions', 'reviews', 'automation', 'accounts'].includes(requestedTab || '')
+      ? requestedTab || 'radar'
+      : 'radar',
+  );
   const [initialLoading, setInitialLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [actionLoading, setActionLoading] = useState('');
@@ -842,8 +850,10 @@ export default function XOperations() {
         ...(previous || { root_post: post, posts: [] }),
         analysis: normalizeAnalysis(analysis),
       }));
+      navigate(`/x/posts/${encodeURIComponent(rootPostId)}`);
     } else {
       await loadConversation(post);
+      navigate(`/x/posts/${encodeURIComponent(rootPostId)}`);
     }
   };
 
@@ -865,6 +875,7 @@ export default function XOperations() {
       posts: responsePosts,
       analysis: normalizeAnalysis(result.analysis),
     });
+    navigate(`/x/posts/${encodeURIComponent(rootPostId)}`);
   };
 
   const handleGenerate = async (post: XPost) => {
@@ -1247,7 +1258,7 @@ export default function XOperations() {
         field === 'write_enabled' && value
           ? '开启账号写入后仍不会自动发布；每条人工回复必须单独审核、确认，并通过发送前实时检查。'
           : field === 'auto_reply_enabled' && value
-            ? '自动回复还必须满足 X 书面批准、自动账号标签、用户主动互动和全局白名单。'
+            ? '自动回复仍必须满足自动账号标签、用户主动互动、低风险策略、频率限制和全局白名单。'
             : `此变更只作用于 @${account.username || account.id}。`
       ),
       okText: '确认变更',
@@ -1258,47 +1269,6 @@ export default function XOperations() {
           `account-${field}-${account.id}`,
           () => updateXAccount(account.id, { [field]: value }),
           `账号${label}已更新`,
-        );
-        if (!result) return Promise.reject();
-      },
-    });
-  };
-
-  const showApprovalEvidenceDialog = (account: XAccount) => {
-    let reference = account.approval_reference || '';
-    modal.confirm({
-      title: '录入 X 书面批准证据',
-      content: (
-        <div style={{ marginTop: 16 }}>
-          <Alert
-            type="warning"
-            showIcon
-            message="仅在确实取得 X 书面批准后录入"
-            description="可填写工单号、批准邮件编号或内部受控附件引用，不要粘贴 Token 或其他密钥。"
-            style={{ marginBottom: 12 }}
-          />
-          <TextArea
-            rows={4}
-            defaultValue={reference}
-            placeholder="例如：X Developer Support ticket #..."
-            onChange={(event) => { reference = event.target.value; }}
-          />
-        </div>
-      ),
-      okText: '确认保存',
-      cancelText: '取消',
-      onOk: async () => {
-        if (reference.trim().length < 3) {
-          messageApi.warning('批准证据引用至少需要 3 个字符');
-          return Promise.reject();
-        }
-        const result = await runAction(
-          `account-approval-${account.id}`,
-          () => saveXAccountApprovalEvidence(account.id, {
-            approval_reference: reference.trim(),
-            x_written_approval: true,
-          }),
-          'X 批准证据已记录',
         );
         if (!result) return Promise.reject();
       },
@@ -1352,14 +1322,11 @@ export default function XOperations() {
   }).length, [reviews]);
 
   const effectiveWriteAllowed = Boolean(
-    automation.effective_write_allowed
+    automation.effective_browser_write_allowed
     ?? (automation.write_enabled && !automation.global_kill_switch),
   );
-  const hasWrittenApproval = accounts.some((account) => (
-    account.x_written_approval && account.automated_label_enabled
-  ));
-  const hasWriteToken = accounts.some((account) => (
-    account.token_configured && !account.token_expired
+  const hasAutomatedAccount = accounts.some((account) => (
+    account.status === 'active' && account.automated_label_enabled
   ));
   const draftEngineAvailable = Boolean(
     automation.credentials?.llm || automation.credentials?.fallback_drafts_available,
@@ -1673,7 +1640,7 @@ export default function XOperations() {
             scroll={{ x: 1150 }}
             pagination={{ pageSize: 15, showSizeChanger: true, showTotal: (total) => `共 ${total} 条帖子` }}
             onRow={(record) => ({
-              onClick: () => void loadConversation(record),
+              onClick: () => navigate(`/x/posts/${encodeURIComponent(postIdentifier(record))}`),
               style: { cursor: 'pointer' },
             })}
             columns={[
@@ -1740,6 +1707,13 @@ export default function XOperations() {
                 onCell: () => ({ onClick: (event) => event.stopPropagation() }),
                 render: (_, record) => (
                   <Space wrap>
+                    <Button
+                      size="small"
+                      icon={<EyeOutlined />}
+                      onClick={() => navigate(`/x/posts/${encodeURIComponent(postIdentifier(record))}`)}
+                    >
+                      查看
+                    </Button>
                     <Popconfirm
                       title="确认采集该帖子线程？"
                       description="会通过浏览器展开原帖页面并采集可见回复。"
@@ -2194,8 +2168,7 @@ export default function XOperations() {
               const approvedTextChanged = ['APPROVED', 'QUEUED', 'PUBLISH_FAILED'].includes(status)
                 && Boolean(review.final_text)
                 && draft.text.trim() !== review.final_text?.trim();
-              const reviewAccountWriteReady = review.account?.status === 'active'
-                && review.account?.write_enabled === true;
+              const reviewAccountWriteReady = review.account?.status === 'active';
               const selectable = !['REJECTED', 'PUBLISHED', 'PUBLISHING', 'CANCELLED'].includes(status);
               const canApprove = canOperate
                 && [
@@ -2213,15 +2186,15 @@ export default function XOperations() {
                 && ['APPROVED', 'QUEUED', 'PUBLISH_FAILED'].includes(status)
                 && effectiveWriteAllowed
                 && reviewAccountWriteReady
-                && review.api_reply_eligible === true
+                && review.manual_browser_publish_eligible !== false
                 && draft.candidateId != null
                 && !approvedTextChanged;
               const publishReason = !effectiveWriteAllowed
                 ? '写入关闭或 Kill Switch 已开启'
                 : !reviewAccountWriteReady
-                  ? '目标账号未启用写入或账号状态不可用'
-                : review.api_reply_eligible !== true
-                  ? (reviewEligibilityReason(review) || '目标不满足受控回复资格，请复制草稿后手工发布')
+                  ? '审核记录绑定的账号状态不可用'
+                  : review.manual_browser_publish_eligible === false
+                    ? (reviewEligibilityReason(review) || '当前审核记录不允许浏览器人工发布')
                   : approvedTextChanged
                     ? '当前文本与已批准版本不同，请重新批准后再发布'
                   : !['APPROVED', 'QUEUED', 'PUBLISH_FAILED'].includes(status)
@@ -2459,7 +2432,7 @@ export default function XOperations() {
                                 description={(
                                   <div>
                                     <Paragraph style={{ marginBottom: 6 }}>
-                                      这会代表已绑定账号真实发布，且只发布当前这一条。
+                                      将使用专用浏览器当前登录账号真实发布，且只发布当前这一条。
                                     </Paragraph>
                                     <Text type="danger">目标：{reviewTargetId(review)}</Text>
                                   </div>
@@ -2507,7 +2480,7 @@ export default function XOperations() {
             type="warning"
             showIcon
             message="安全控制仅管理员可修改"
-            description="自动回复必须同时满足 X 书面批准、用户主动互动、浏览器实时校验、低风险策略和写入预算限制。任何单项开关都不能绕过后端资格检查。"
+            description="受控自动回复不要求额外录入书面批准，但仍必须满足自动账号标签、用户主动互动、浏览器实时校验、低风险策略、频率限制和写入预算。"
             style={{ marginBottom: 16 }}
           />
 
@@ -2613,7 +2586,7 @@ export default function XOperations() {
                           disabled={!isAdmin || (
                             item.key === 'auto_reply_enabled'
                             && !item.value
-                            && !hasWrittenApproval
+                            && !hasAutomatedAccount
                           )}
                           loading={actionLoading === `control-${item.key}`}
                           onChange={(checked) => confirmControlChange(
@@ -2634,11 +2607,11 @@ export default function XOperations() {
                     </List.Item>
                   )}
                 />
-                {!hasWrittenApproval && (
+                {!hasAutomatedAccount && (
                   <Alert
                     type="warning"
                     showIcon
-                    message="尚未记录 X 书面批准，受控自动回复不可开启"
+                    message="请先为至少一个活跃账号启用自动账号标签，再开启受控自动回复"
                     style={{ marginTop: 12 }}
                   />
                 )}
@@ -3070,35 +3043,10 @@ export default function XOperations() {
                       checked={Boolean(value)}
                       checkedChildren="开启"
                       unCheckedChildren="关闭"
-                      disabled={!isAdmin || (!value && (!record.x_written_approval || !record.automated_label_enabled))}
+                      disabled={!isAdmin || (!value && !record.automated_label_enabled)}
                       loading={actionLoading === `account-auto_reply_enabled-${record.id}`}
                       onChange={(checked) => confirmAccountToggle(record, 'auto_reply_enabled', checked, '自动回复')}
                     />
-                  ),
-                },
-                {
-                  title: 'X 批准证据',
-                  key: 'approval',
-                  width: 170,
-                  render: (_, record) => (
-                    <Space direction="vertical" size={2}>
-                      {record.x_written_approval
-                        ? <Tag color="success">已记录</Tag>
-                        : <Tag color="error">未记录</Tag>}
-                      <Text type="secondary" ellipsis style={{ maxWidth: 160 }}>
-                        {record.approval_reference || '—'}
-                      </Text>
-                      <Button
-                        type="link"
-                        size="small"
-                        style={{ padding: 0 }}
-                        disabled={!isAdmin}
-                        loading={actionLoading === `account-approval-${record.id}`}
-                        onClick={() => showApprovalEvidenceDialog(record)}
-                      >
-                        {record.x_written_approval ? '更新证据' : '录入证据'}
-                      </Button>
-                    </Space>
                   ),
                 },
                 {
@@ -3299,8 +3247,8 @@ export default function XOperations() {
             <Tag color={automation.credentials?.browser_read_source ? 'success' : 'default'}>
               浏览器读取 {automation.credentials?.browser_read_source ? '已启用' : '不可用'}
             </Tag>
-            <Tag color={hasWriteToken ? 'success' : 'default'}>
-              写入凭证 {hasWriteToken ? '就绪' : '未配置'}
+            <Tag color={browserStatus.cdp_ready ? 'success' : 'processing'}>
+              浏览器写入 {browserStatus.cdp_ready ? '已连接' : '发送时连接'}
             </Tag>
             <Tag color={draftEngineAvailable ? 'success' : 'default'}>
               草稿引擎 {automation.credentials?.llm ? 'LLM' : draftEngineAvailable ? '本地安全模式' : '未配置'}
